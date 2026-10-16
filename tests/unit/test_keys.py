@@ -31,3 +31,9 @@ def test_default_exclusion_regex_skips_pipeline_internal_tables():
     assert rx.search("event_log_8aa28cfc_fbd8_40b7_81d6_7a8f9fca284f")
     assert not rx.search("event_log_business")
     assert not rx.search("patient_encounter")
+
+
+def test_fingerprint_matches_spark_trim_semantics():
+    # Spark trim() removes spaces only; tabs/newlines are significant, as in the SQL fingerprint.
+    assert fingerprint("c", "s", "t", "x", "STRING", "note\n") != fingerprint("c", "s", "t", "x", "STRING", "note")
+    assert fingerprint("c", "s", "t", "x", "STRING", "  note  ") == fingerprint("c", "s", "t", "x", "STRING", "note")

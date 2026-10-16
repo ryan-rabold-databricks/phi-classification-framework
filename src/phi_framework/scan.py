@@ -192,9 +192,10 @@ class Scan:
                   QUALIFY rank() OVER (PARTITION BY catalog_name, schema_name, table_name, column_name
                                        ORDER BY latest_detected_time DESC) = 1
                 ), mapped AS (
-                  SELECT l.*, m.phi_tag_value
-                  FROM latest l JOIN {self.rt.t(c.T_MAPPING)} m ON m.class_tag = l.class_tag AND m.is_active
-                  JOIN phi_allowed_values a ON a.value = m.phi_tag_value
+                  SELECT l.*, a.value AS phi_tag_value
+                  FROM latest l
+                  LEFT JOIN {self.rt.t(c.T_MAPPING)} m ON m.class_tag = l.class_tag AND m.is_active
+                  LEFT JOIN phi_allowed_values a ON a.value = m.phi_tag_value
                 )
                 SELECT catalog_name, schema_name, table_name, column_name,
                        first(phi_tag_value) AS suggested_tag_value,
@@ -202,7 +203,8 @@ class Scan:
                            format_number(frequency, 2), CAST(latest_detected_time AS STRING))), ' | ') AS suggestion_reason
                 FROM mapped
                 GROUP BY catalog_name, schema_name, table_name, column_name
-                HAVING count(DISTINCT phi_tag_value) = 1"""
+                -- Every latest HIGH detection must map to the same allowed value; an unmapped detection blocks it.
+                HAVING count_if(phi_tag_value IS NULL) = 0 AND count(DISTINCT phi_tag_value) = 1"""
                 # The samples column is never selected.
             ).createOrReplaceTempView("phi_suggestions")
         else:
@@ -363,10 +365,20 @@ class Scan:
     # ------------------------------------------------------------------
     def _update_open_items(self) -> None:
         stage = f"{self.s.schema_fqn}.{qi(STAGE_TABLE)}"
-        fields = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "issue_type",
-                  "current_tag_value", "suggested_tag_value", "suggestion_reason"]
-        changed = " OR ".join(f"NOT (t.{f} <=> s.{f})" for f in fields)
-        sets = ", ".join(f"{f} = s.{f}" for f in fields)
+        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value"]
+        frozen = ["issue_type", "suggested_tag_value", "suggestion_reason"]
+        # Once an item has gone to a steward (assigned) or is a correction, its issue and suggestion are
+        # frozen: a steward's APPROVE_SUGGESTION must approve the value they were shown.
+        mutable = (
+            f"t.status = {lit(c.PENDING_STEWARD_REVIEW)} AND t.assigned_steward IS NULL "
+            f"AND t.issue_type <> {lit(c.CORRECTION_REQUESTED)}"
+        )
+        changed = " OR ".join(
+            [f"NOT (t.{f} <=> s.{f})" for f in metadata] + [f"({mutable} AND NOT (t.{f} <=> s.{f}))" for f in frozen]
+        )
+        sets = ", ".join(
+            [f"{f} = s.{f}" for f in metadata] + [f"{f} = CASE WHEN {mutable} THEN s.{f} ELSE t.{f} END" for f in frozen]
+        )
         self.rt.sql(
             f"""MERGE INTO {self.rt.t(c.T_ITEM)} t
             USING (SELECT * FROM {stage} WHERE issue_type IS NOT NULL AND open_item_id IS NOT NULL) s

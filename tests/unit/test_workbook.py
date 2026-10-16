@@ -65,3 +65,21 @@ def test_rejects_foreign_workbook():
 
 def test_content_hash_changes_with_rows():
     assert content_hash("REVIEW", "B", "a", ROWS) != content_hash("REVIEW", "B", "a", ROWS[:1])
+
+
+def test_formula_like_values_are_stored_literally():
+    rows = [dict(ROWS[0], column_comment="=HYPERLINK(\"http://x\")", steward_comment="=see doc")]
+    data = build_workbook(c.WB_REVIEW, "BATCH-1", "s@example.com", rows, ["name"], {}, "pw")
+    ws = load_workbook(io.BytesIO(data))[DATA_SHEET]
+    headers = [c_.value for c_ in ws[1]]
+    cell = ws.cell(row=2, column=headers.index("column_comment") + 1)
+    assert cell.data_type == "s" and cell.value.startswith("=HYPERLINK")
+    parsed = parse_workbook(data)
+    assert parsed.rows[0].values["steward_comment"] == "=see doc"
+
+
+def test_duplicate_item_rows_are_rejected():
+    rows = [ROWS[0], dict(ROWS[0])]
+    data = build_workbook(c.WB_REVIEW, "BATCH-1", "s@example.com", rows, ["name"], {}, "pw")
+    with pytest.raises(ValueError, match="appears on rows"):
+        parse_workbook(data)

@@ -41,14 +41,18 @@ RETURN concat(prefix, '-', upper(substr(
 
 
 def fingerprint(catalog: str, schema: str, table: str, column: str, full_data_type: str, comment: str | None) -> str:
-    """Python mirror of the scan's column fingerprint (used by tests and the application recheck)."""
+    """Python mirror of the scan's column fingerprint, for tests and tools.
+
+    Spark ``trim`` removes only spaces, so this strips only spaces (not tabs or newlines).
+    The jobs always compute fingerprints with ``fingerprint_sql`` so both sides use one engine.
+    """
     parts = [
-        catalog.strip().lower(),
-        schema.strip().lower(),
-        table.strip().lower(),
-        column.strip().lower(),
-        full_data_type.strip().upper(),
-        (comment or "").strip().lower(),
+        catalog.strip(' ').lower(),
+        schema.strip(' ').lower(),
+        table.strip(' ').lower(),
+        column.strip(' ').lower(),
+        full_data_type.strip(' ').upper(),
+        (comment or "").strip(' ').lower(),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 

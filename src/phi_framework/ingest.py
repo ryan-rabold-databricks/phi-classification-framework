@@ -53,6 +53,11 @@ ATTESTATION_SCHEMA = (
 )
 
 
+# Batch id recorded on WORKBOOK_REJECTED events when a file cannot be parsed far enough to
+# identify its batch (foreign keys are informational, so the sentinel is accepted).
+UNPARSED_BATCH_ID = "UNPARSED"
+
+
 @dataclass
 class SetResult:
     counts: dict
@@ -73,7 +78,8 @@ class Ingestion:
             r["discriminator"]
             for r in self.rt.rows(
                 f"SELECT DISTINCT discriminator FROM {self.rt.t(c.T_EVENT)} "
-                f"WHERE event_type = {lit(c.EV_WORKBOOK_INGESTED)} AND discriminator IS NOT NULL"
+                f"WHERE event_type IN ({lit(c.EV_WORKBOOK_INGESTED)}, {lit(c.EV_WORKBOOK_REJECTED)}) "
+                f"AND discriminator IS NOT NULL"
             )
         }
         processed = 0
@@ -84,10 +90,18 @@ class Ingestion:
                 continue
             try:
                 parsed = parse_workbook(data)
-            except Exception as exc:
+            except Exception as exc:  # report once, then skip this content on later runs
                 msg = f"{path}: {exc}"
                 log.error("Rejected workbook %s", msg)
                 self.failures.append(msg)
+                self.rt.event(
+                    c.EV_WORKBOOK_REJECTED,
+                    UNPARSED_BATCH_ID,
+                    details={"path": path, "error": str(exc)[:2000]},
+                    discriminator=sha,
+                )
+                self.rt.flush_events()
+                seen.add(sha)
                 continue
             self._write_submissions(sha, path, parsed)
             result = self.process_submission_set(sha, parsed.workbook_type, parsed.review_batch_id)
@@ -184,7 +198,8 @@ class Ingestion:
             sub["review_batch_id"],
             sub["review_item_id"],
             business_actor=(sub.get("reviewed_by") or "").lower() or None,
-            details={"kind": kind, "errors": errors, "submitted": _submitted(sub)},
+            details={"kind": kind, "submission_type": sub.get("submission_type"), "errors": errors,
+                     "submitted": _submitted(sub)},
             discriminator=set_id,
         )
 
@@ -303,6 +318,11 @@ class Ingestion:
             )
             if not out.ok:
                 counts["failed"] += 1
+                if privacy_item:
+                    # A rejected Privacy outcome must not take the item out of Privacy review;
+                    # record the rejection only (the PRIVACY workbook shows the reason).
+                    self._reject(set_id, sub, list(out.errors), "DECISION")
+                    continue
                 item_updates.append(
                     {
                         "review_item_id": it["review_item_id"],

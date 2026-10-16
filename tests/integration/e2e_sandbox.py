@@ -36,7 +36,7 @@ from openpyxl import load_workbook
 from sqlexec import Sql
 
 from phi_framework import constants as c
-from phi_framework.keys import make_key
+from phi_framework.keys import make_key, make_key_sql
 from phi_framework.sqlutil import fqn, lit, qi
 from phi_framework.workbook import DATA_SHEET
 
@@ -249,6 +249,8 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         print("== 0. Key parity (Python vs SQL make_key)")
         sql_key = self.sql.scalar(f"SELECT {fqn(self.gc, self.gs, 'make_key')}('ITEM', array('a', NULL, 'c'))")
         check("make_key parity", sql_key == make_key("ITEM", ["a", None, "c"]), f"{sql_key}")
+        inline = self.sql.scalar(f"SELECT {make_key_sql('ITEM', lit('a'), 'NULL', lit('c'))}")
+        check("inline make_key_sql parity", inline == make_key("ITEM", ["a", None, "c"]), f"{inline}")
 
         print("== 1. Setup job is idempotent")
         self.run_job("phi_framework_setup")
@@ -362,14 +364,28 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
 
         print("== 8. Privacy outcome, rejected-row fixes, and an ignored change")
         priv = self.outbound(c.WB_PRIVACY)[-1]
+        first_review = next(p for p in reviews if self.item(cl, "patient_encounter", "patient_name")["review_batch_id"] in p)
+        notes_id = self.item(cl, "patient_encounter", "notes")["review_item_id"]
+        # A steward's REVIEW workbook cannot resolve a Privacy item, and a rejected Privacy outcome must
+        # leave the item in Privacy review (otherwise the valid outcome below would be refused).
+        self.edit_and_upload(first_review, {(cl, "patient_encounter", "notes"): {
+            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "steward tries to close it", "reviewed_at": self.now_local()}},
+            "review_notes_misdirected.xlsx")
+        self.edit_and_upload(priv, {(cl, "patient_encounter", "notes"): {
+            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "not from governance", "reviewed_by": "not.gov@example.com",
+            "reviewed_at": self.now_local()}}, "privacy_bad.xlsx")
         self.edit_and_upload(priv, {(cl, "patient_encounter", "notes"): {
             "decision": c.CONFIRM_NOT_PHI, "steward_comment": "Privacy: notes are system-generated", "reviewed_by": self.me,
             "reviewed_at": self.now_local(-5)}}, "privacy_v1.xlsx")
         # Revised copy of an already-accepted workbook changes an accepted decision -> ignored and reported.
-        first_review = next(p for p in reviews if self.item(cl, "patient_encounter", "patient_name")["review_batch_id"] in p)
         self.edit_and_upload(first_review, {**dec, (cl, "patient_encounter", "patient_name"): {
             "decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn", "reviewed_at": at}}, "review_clinical_v2.xlsx")
         self.run_job("phi_decision_ingestion")
+        notes_errors = " ".join(r["d"] for r in self.q(
+            f"SELECT CAST(event_details AS STRING) AS d FROM {self.t(c.T_EVENT)} "
+            f"WHERE event_type = 'VALIDATION_FAILED' AND review_item_id = {lit(notes_id)}"))
+        check("REVIEW workbook cannot resolve a Privacy item", "only a PRIVACY workbook" in notes_errors, notes_errors[:300])
+        check("non-governance Privacy outcome rejected", "to record a Privacy outcome" in notes_errors, notes_errors[:300])
         check("privacy outcome -> ATTESTED_NOT_PHI", self.item(cl, "patient_encounter", "notes")["status"] == c.ATTESTED_NOT_PHI)
         check("change to accepted item ignored", len(self.events(c.EV_CHANGE_IGNORED)) >= 1
               and self.tag_value(cl, "patient_encounter", "patient_name") == self.mapping["class.name"])
@@ -403,6 +419,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         print("== 10. Metadata changes reopen items; removed columns close")
         self.q(f"ALTER TABLE {fqn(self.cat, cl, 'patient_encounter')} ALTER COLUMN source_system_code COMMENT 'Changed purpose'")
         self.q(f"ALTER TABLE {fqn(self.cat, cl, 'patient_encounter')} ALTER COLUMN ssn COMMENT 'SSN (changed)'")
+        self.q(f"ALTER TABLE {fqn(self.cat, cl, 'patient_encounter')} ALTER COLUMN notes COMMENT 'Free text notes (v2)'")
         self.q(f"CREATE OR REPLACE TABLE {fqn(self.cat, fi, 'temp_drop')} (x STRING)")
         self.run_job("phi_classification_scan", self.scan_params)
         check("STALE_NON_PHI_ATTESTATION", self.item(cl, "patient_encounter", "source_system_code", True)["issue_type"] == c.STALE_NON_PHI_ATTESTATION)
@@ -411,6 +428,35 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         self.q(f"DROP TABLE {fqn(self.cat, fi, 'temp_drop')}")
         self.run_job("phi_classification_scan", self.scan_params)
         check("removed column -> CLOSED_NO_ACTION", self.item(fi, "temp_drop", "x")["status"] == c.CLOSED_NO_ACTION)
+
+        print("== 10b. Re-decide reopened columns: new attestation and PHI tag both supersede the old attestation")
+        ssc = self.item(cl, "patient_encounter", "source_system_code", True)
+        nts = self.item(cl, "patient_encounter", "notes", True)
+        assign = [p for p in self.outbound(c.WB_ASSIGNMENT) if ssc["review_batch_id"] in p][-1]
+        self.edit_and_upload(assign, {ssc["review_item_id"]: {"assigned_steward": self.me},
+                                      nts["review_item_id"]: {"assigned_steward": self.me}}, "assign_reopened.xlsx")
+        self.run_job("phi_decision_ingestion")
+        rev = [p for p in self.outbound(c.WB_REVIEW) if ssc["review_batch_id"] in p][-1]
+        self.edit_and_upload(rev, {
+            ssc["review_item_id"]: {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": self.mapping["class.name"],
+                                    "reviewed_at": self.now_local()},
+            nts["review_item_id"]: {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Still system-generated",
+                                    "reviewed_at": self.now_local()}}, "review_reopened.xlsx")
+        self.run_job("phi_decision_ingestion")
+        self.run_job("phi_classification_application")
+
+        def active_atts(col):
+            return int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ATTESTATION)} WHERE table_name = 'patient_encounter' "
+                                       f"AND column_name = {lit(col)} AND superseded_at IS NULL"))
+
+        def superseded_atts(col):
+            return int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ATTESTATION)} WHERE table_name = 'patient_encounter' "
+                                       f"AND column_name = {lit(col)} AND superseded_at IS NOT NULL"))
+
+        check("re-attestation leaves exactly one active attestation", active_atts("notes") == 1 and superseded_atts("notes") == 1)
+        check("verified PHI tag supersedes the non-PHI attestation",
+              active_atts("source_system_code") == 0 and superseded_atts("source_system_code") == 1
+              and self.tag_value(cl, "patient_encounter", "source_system_code") == self.mapping["class.name"])
 
         print("== 11. Correction request and tag removal on a verified PHI column")
         col = f"{self.cat}.{cl}.patient_encounter.mrn"

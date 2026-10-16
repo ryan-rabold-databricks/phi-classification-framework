@@ -115,6 +115,8 @@ def build_workbook(
         for idx, (header, _, editable) in enumerate(columns, start=1):
             value = row.get(header)
             cell = ws.cell(row=r, column=idx, value=None if value is None else str(value))
+            if value is not None:
+                cell.data_type = "s"  # store literally: metadata starting with '=' must never become a formula
             if editable:
                 cell.protection = Protection(locked=False)
                 cell.fill = edit_fill
@@ -192,10 +194,14 @@ def parse_workbook(data: bytes) -> ParsedWorkbook:
     idx = {h: i for i, h in enumerate(expected)}
     editable = [h for h, _, e in columns if e]
     rows: list[ParsedRow] = []
+    seen: dict[str, int] = {}
     for r_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         item_id = _text(row[idx["review_item_id"]]) if row else None
         if not item_id:
             continue
+        if item_id in seen:
+            raise ValueError(f"review_item_id {item_id} appears on rows {seen[item_id]} and {r_num}; remove the duplicate")
+        seen[item_id] = r_num
         values = {h: _text(row[idx[h]]) for h in editable}
         rows.append(ParsedRow(row_number=r_num, review_item_id=item_id, values=values))
     return ParsedWorkbook(workbook_type=wtype, review_batch_id=batch, meta=meta, rows=rows)

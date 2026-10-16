@@ -44,11 +44,13 @@ class Export:
         items = self.rt.rows(
             f"""WITH last_error AS (
                   SELECT review_item_id,
-                         max_by(CAST(event_details:errors AS STRING), event_timestamp) AS last_validation_error
+                         max_by(CAST(event_details:errors AS STRING), event_timestamp) AS last_validation_error,
+                         max_by(CAST(event_details:submission_type AS STRING), event_timestamp) AS last_error_source,
+                         max(event_timestamp) AS last_error_at
                   FROM {self.rt.t(c.T_EVENT)}
                   WHERE event_type = {lit(c.EV_VALIDATION_FAILED)} AND review_item_id IS NOT NULL
                   GROUP BY review_item_id)
-                SELECT i.*, b.scope_id, s.steward_group, e.last_validation_error
+                SELECT i.*, b.scope_id, s.steward_group, e.last_validation_error, e.last_error_source, e.last_error_at
                 FROM {self.rt.t(c.T_ITEM)} i
                 JOIN {self.rt.t(c.T_BATCH)} b ON b.review_batch_id = i.review_batch_id
                 JOIN {self.rt.t(c.T_SCOPE)} s ON s.scope_id = b.scope_id
@@ -90,7 +92,15 @@ class Export:
         else:
             row["reviewed_by"] = it.get("reviewed_by") or it.get("assigned_steward")
         err = it.get("last_validation_error")
-        if err and it["status"] == c.VALIDATION_FAILED:
+        # Privacy items keep their status when an outcome is rejected, so show the latest error from
+        # a PRIVACY submission recorded after the item last changed.
+        privacy_error = (
+            it["status"] == c.NEEDS_PRIVACY_REVIEW
+            and it.get("last_error_source") == c.WB_PRIVACY
+            and it.get("last_error_at") is not None
+            and it["last_error_at"] >= it["audit_updated_at"]
+        )
+        if err and (it["status"] == c.VALIDATION_FAILED or privacy_error):
             try:
                 row["last_validation_error"] = "; ".join(json.loads(err))
             except (TypeError, ValueError):

@@ -37,5 +37,5 @@ line-length = 130
 ignore = ["DTZ001", "DTZ005", "DTZ007", "BLE001"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tests/unit"]
 testpaths = ["tests/unit"]

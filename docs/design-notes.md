@@ -67,7 +67,28 @@ implementation adds to, interprets, or deviates from that design, and why.
 16. **Pipeline-internal tables are excluded** (`excluded_table_regex`): materialized-view
     backing tables and pipeline event-log tables appear in `information_schema` as
     `MANAGED` tables but are not business data.
-17. **Due dates** are 17:00 in `business_timezone`, `review_due_business_days`
+17. **Suggestions are frozen once an item is assigned.** Each scan refreshes metadata
+    (type, comment, fingerprint, current tag) on open items, but it changes `issue_type`,
+    `suggested_tag_value`, and `suggestion_reason` only while the item is unassigned and
+    pending. A steward's `APPROVE_SUGGESTION` therefore approves the value they were shown.
+    `CORRECTION_REQUESTED` is never overwritten.
+18. **Every latest HIGH detection must map to the same allowed value.** An unmapped
+    detection blocks the suggestion.
+19. **Rejected workbooks are recorded once** as `WORKBOOK_REJECTED` (keyed by SHA-256, with
+    `review_batch_id = 'UNPARSED'` when the batch cannot be read). Ingestion alerts once and
+    then skips that content instead of failing every run. Duplicate `review_item_id` rows
+    reject the workbook.
+20. **A rejected Privacy outcome keeps the item in `NEEDS_PRIVACY_REVIEW`.** The PRIVACY
+    workbook shows the reason, so a steward can never resolve a Privacy item by default.
+21. **A verified PHI tag supersedes the column's active non-PHI attestation**, so a
+    column is never both tagged and attested.
+22. **Application failures survive task retries.** The job fails whenever this job run
+    recorded `APPLICATION_FAILED` items, even if a retry attempt had nothing left to apply.
+23. **Fingerprints are computed by Spark in every job.** Spark `trim` removes only spaces;
+    the Python mirror in `keys.py` matches it and is used only by tests.
+24. **Workbook cells are stored as literal strings**, so metadata that begins with `=`
+    never becomes an Excel formula.
+25. **Due dates** are 17:00 in `business_timezone`, `review_due_business_days`
     business days after the batch is created. Holidays are not modeled.
 
 ## Open items for the customer

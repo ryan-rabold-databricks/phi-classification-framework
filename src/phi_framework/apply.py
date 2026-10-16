@@ -22,7 +22,7 @@ from phi_framework import constants as c
 from phi_framework.batches import close_completed_batches
 from phi_framework.config import Settings
 from phi_framework.directory import TagPolicy
-from phi_framework.keys import fingerprint
+from phi_framework.keys import fingerprint_sql
 from phi_framework.runtime import Runtime, log
 from phi_framework.sqlutil import in_list, lit, qi
 
@@ -63,8 +63,16 @@ class Application:
             self._record(plans, errors, verified)
         close_completed_batches(self.rt)
         self.rt.flush_events()
-        failed = sum(1 for p in plans if p["review_item_id"] in errors) if plans else 0
-        log.info("Applied %d, failed %d", len(plans) - failed, failed)
+        # Count failures recorded by this job run, not just this attempt: a task retry reuses the
+        # run id, finds nothing left to apply, and must still fail so on_failure alerts fire.
+        failed = int(
+            self.rt.rows(
+                f"""SELECT count(*) AS n FROM {self.rt.t(c.T_ITEM)}
+                WHERE status = {lit(c.APPLICATION_FAILED)} AND audit_updated_run_id = {lit(self.s.run_id)}
+                  AND audit_updated_process = {lit(self.s.process_name)}"""
+            )[0]["n"]
+        )
+        log.info("Applied %d, failed %d", len(plans) - sum(1 for p in plans if p["review_item_id"] in errors), failed)
         if failed:
             # Fail the run so job failure notifications reach Data Platform.
             raise RuntimeError(f"{failed} plan row(s) failed; see APPLICATION_FAILED items")
@@ -102,7 +110,9 @@ class Application:
             live = {
                 (r["table_schema"], r["table_name"], r["column_name"]): r
                 for r in self.rt.rows(
-                    f"""SELECT c.table_schema, c.table_name, c.column_name, c.full_data_type, c.comment, t.table_type
+                    f"""SELECT c.table_schema, c.table_name, c.column_name, t.table_type,
+                      {fingerprint_sql('c.table_catalog', 'c.table_schema', 'c.table_name', 'c.column_name',
+                                       'c.full_data_type', 'c.comment')} AS column_fingerprint
                     FROM {qi(cat)}.information_schema.columns c
                     JOIN {qi(cat)}.information_schema.tables t
                       ON t.table_schema = c.table_schema AND t.table_name = c.table_name
@@ -116,7 +126,7 @@ class Application:
                     err = "LookupError: column no longer exists (stale metadata); return to Data Governance"
                 elif col["table_type"] != p["table_type"]:
                     err = f"ValueError: object type changed from {p['table_type']} to {col['table_type']}"
-                elif fingerprint(cat, *_ident(p), col["full_data_type"], col["comment"]) != p["column_fingerprint"]:
+                elif col["column_fingerprint"] != p["column_fingerprint"]:
                     err = "ValueError: column metadata changed since approval (fingerprint mismatch); the next scan reopens it"
                 elif p["action_type"] == c.SET_PHI_TAG and not policy.is_allowed(p["approved_tag_value"]):
                     err = f"ValueError: {p['approved_tag_value']!r} is no longer an allowed value for {self.s.tag_key}"
@@ -165,6 +175,9 @@ class Application:
             else:
                 results.append({"review_item_id": iid, "status": c.ATTESTED_NOT_PHI, "application_error": None, "applied": True})
                 self.rt.event(c.EV_TAG_REMOVED, p["review_batch_id"], iid, business_actor=p["reviewed_by"], details=details)
+        verified_set = [p for p in plans if p["review_item_id"] not in errors and p["action_type"] == c.SET_PHI_TAG]
+        if verified_set:
+            self._supersede_attestations(verified_set)
         view = self.rt.temp_view(results, RESULT_SCHEMA, "phi_apply_results")
         self.rt.sql(
             f"""MERGE INTO {self.rt.t(c.T_ITEM)} t USING {view} s ON t.review_item_id = s.review_item_id
@@ -172,6 +185,21 @@ class Application:
               status = s.status, application_error = s.application_error,
               applied_at = CASE WHEN s.applied THEN current_timestamp() ELSE t.applied_at END,
               {self.rt.audit_update_set()}"""
+        )
+
+    def _supersede_attestations(self, plans: list[dict]) -> None:
+        """A verified PHI tag replaces any active non-PHI attestation for the same column."""
+        cols = [{"catalog_name": p["catalog_name"], "schema_name": p["schema_name"],
+                 "table_name": p["table_name"], "column_name": p["column_name"]} for p in plans]
+        view = self.rt.temp_view(
+            cols, "catalog_name string, schema_name string, table_name string, column_name string", "phi_apply_cols"
+        )
+        self.rt.sql(
+            f"""MERGE INTO {self.rt.t(c.T_ATTESTATION)} t USING {view} s
+            ON t.catalog_name = s.catalog_name AND t.schema_name = s.schema_name
+               AND t.table_name = s.table_name AND t.column_name = s.column_name
+            WHEN MATCHED AND t.superseded_at IS NULL
+              THEN UPDATE SET superseded_at = current_timestamp(), {self.rt.audit_update_set()}"""
         )
 
 
