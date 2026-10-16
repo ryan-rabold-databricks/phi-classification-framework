@@ -314,8 +314,18 @@ uv run ruff check src tests tools
 # End-to-end against a dev sandbox with synthetic data
 uv run --with openpyxl python tests/integration/e2e_sandbox.py \
     -p <profile> --warehouse-id <id> --reset \
-    --mapping <mapping CSV whose values match the tag policy>
+    --mapping <mapping CSV whose values match the tag policy> \
+    --steward-group <dev test steward group>
 ```
+
+Before running it:
+
+- **Use a throwaway governance schema.** Set the bundle's `governance_schema` to a test
+  schema such as `phifw_e2e`. `--reset` drops and recreates the governance schema and the
+  synthetic schemas, and it refuses to run unless every one of them starts with `phifw_`.
+  A real `data_governance` schema can never be dropped by the test.
+- **Join both test groups.** Create a dev-only steward group and pass it as `--steward-group`.
+  The user running the test must belong to that group and to the bundle's `governance_group`.
 
 `--mapping` must point to a mapping whose values exist in your tag policy.
 `tests/integration/fixtures/suggestion_mapping_hipaa18.csv` targets an 18-identifier

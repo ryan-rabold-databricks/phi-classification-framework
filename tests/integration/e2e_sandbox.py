@@ -5,14 +5,21 @@ edits the exported workbooks the way Data Governance and stewards would, and
 asserts every state transition. Synthetic data only.
 
   uv run --with openpyxl python tests/integration/e2e_sandbox.py \
-      -p <profile> --warehouse-id <id> --test-schema-prefix phifw_test --reset
+      -p <profile> --warehouse-id <id> --test-schema-prefix phifw_test --reset \
+      --steward-group <dev test steward group> --mapping <mapping CSV>
 
 Bundle variables (governance catalog/schema, tag key, groups, ...) are read
 from `databricks bundle validate -t dev`. The current user must be a member of
 the steward group and the governance group.
 
 --reset drops and recreates the governance schema and the synthetic schemas.
-It refuses to run unless the target's env is dev.
+It refuses to run unless the target's env is dev AND every schema it would drop
+starts with the test prefix "phifw_" (so a real governance schema such as
+data_governance can never be dropped by mistake). Point the bundle's
+governance_schema at a throwaway schema (for example phifw_e2e) before using it.
+
+--steward-group names the group used as the steward group for the synthetic
+scopes. The current user must be a member of it and of the bundle's governance_group.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ from phi_framework.sqlutil import fqn, lit, qi
 from phi_framework.workbook import DATA_SHEET
 
 RESULTS: list[tuple[str, bool, str]] = []
+RESET_SAFE_PREFIX = "phifw_"
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -75,6 +83,15 @@ class E2E:
         self.clinical = f"{a.test_schema_prefix}_clinical"
         self.finance = f"{a.test_schema_prefix}_finance"
         self.support = f"{a.test_schema_prefix}_support"
+        if a.reset:
+            unsafe = [s for s in (self.gs, self.clinical, self.finance, self.support) if not s.startswith(RESET_SAFE_PREFIX)]
+            if unsafe:
+                raise SystemExit(
+                    f"--reset refused: it would DROP SCHEMA ... CASCADE on {', '.join(unsafe)}, which "
+                    f"do not start with {RESET_SAFE_PREFIX!r}. Set the bundle's governance_schema to a "
+                    f"throwaway schema (for example {RESET_SAFE_PREFIX}e2e) and keep --test-schema-prefix "
+                    f"starting with {RESET_SAFE_PREFIX!r}."
+                )
         self.vol = f"/Volumes/{self.gc}/{self.gs}/{c.V_FILES}"
         # Governed mode: a real tag policy enforces allowed values, so an invalid pre-existing tag
         # cannot be staged. The test pre-tags a valid value without review evidence instead and
@@ -97,7 +114,12 @@ class E2E:
         waiter = self.w.jobs.run_now(job_id=self.jobs[key], job_parameters=params or {})
         run_id = waiter.response.run_id
         while True:
-            run = self.w.jobs.get_run(run_id)
+            try:
+                run = self.w.jobs.get_run(run_id)
+            except (ConnectionError, TimeoutError, OSError) as exc:  # laptop sleep / network drop: keep polling
+                print(f"  (polling {key} run {run_id} failed: {type(exc).__name__}; retrying)")
+                time.sleep(30)
+                continue
             if run.state.life_cycle_state.value in ("TERMINATED", "INTERNAL_ERROR", "SKIPPED"):
                 break
             time.sleep(10)
@@ -224,7 +246,7 @@ class E2E:
             for s, t, col, tag, conf in rows
         )
         self.q(f"INSERT INTO {dc} VALUES {values}")
-        stewards, gov = "phifw_clinical_stewards", self.v["governance_group"]
+        stewards, gov = self.a.steward_group, self.v["governance_group"]
         scopes = f"""scope_id,catalog_name,schema_name,environment,risk_tier,steward_group,governance_owner,scan_enabled,effective_date,expiration_date
 SCOPE-CLINICAL-DEV,{C},{self.clinical},dev,HIGH,{stewards},{gov},true,2026-01-01,
 SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-01,
@@ -501,6 +523,8 @@ def main() -> None:
     ap.add_argument("--warehouse-id", required=True)
     ap.add_argument("--test-schema-prefix", default="phifw_test")
     ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--steward-group", default="phifw_clinical_stewards",
+                    help="Steward group for the synthetic scopes; the current user must be a member")
     ap.add_argument("--skip-mv", action="store_true")
     ap.add_argument("--mapping", default="reference_data/suggestion_mapping.csv",
                     help="Suggestion mapping CSV whose values match the tag's allowed values")
