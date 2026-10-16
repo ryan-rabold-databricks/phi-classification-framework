@@ -8,7 +8,6 @@ resources:
       email_notifications:
         on_failure: ${var.failure_notification_emails}
       trigger:
-        pause_status: UNPAUSED
         table_update:
           table_names:
             - ${var.governance_catalog}.${var.governance_schema}.classification_application_plan
@@ -42,6 +41,8 @@ resources:
           default: ${var.detect_orphaned_tags}
         - name: workbook_protection_password
           default: ${var.workbook_protection_password}
+        - name: allowed_values_override
+          default: ${var.allowed_values_override}
         - name: retry_failed
           default: "false"
       tasks:
@@ -80,6 +81,8 @@ resources:
                 - "{{job.parameters.detect_orphaned_tags}}"
                 - --workbook-protection-password
                 - "{{job.parameters.workbook_protection_password}}"
+                - --allowed-values-override
+                - "{{job.parameters.allowed_values_override}}"
                 - --retry-failed
                 - "{{job.parameters.retry_failed}}"
       environments:

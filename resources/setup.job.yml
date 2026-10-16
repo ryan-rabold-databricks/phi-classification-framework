@@ -34,6 +34,8 @@ resources:
           default: ${var.detect_orphaned_tags}
         - name: workbook_protection_password
           default: ${var.workbook_protection_password}
+        - name: allowed_values_override
+          default: ${var.allowed_values_override}
       tasks:
         - task_key: setup
           environment_key: framework
@@ -70,6 +72,8 @@ resources:
                 - "{{job.parameters.detect_orphaned_tags}}"
                 - --workbook-protection-password
                 - "{{job.parameters.workbook_protection_password}}"
+                - --allowed-values-override
+                - "{{job.parameters.allowed_values_override}}"
       environments:
         - environment_key: framework
           spec:

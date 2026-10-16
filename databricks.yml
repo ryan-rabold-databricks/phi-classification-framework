@@ -49,9 +49,9 @@ variables:
   workbook_protection_password:
     description: Excel sheet-protection password. Prevents accidental edits only; it is not a security control.
     default: phi-review
-  scan_pause_status:
-    description: PAUSED or UNPAUSED for the weekly schedule (development mode always pauses).
-    default: UNPAUSED
+  allowed_values_override:
+    description: dev only. Comma-separated allowed values used instead of the governed-tag policy (sandboxes only).
+    default: ""
   framework_service_principal:
     description: Application ID of the framework service principal (qa and prod run as this identity).
     default: ""
@@ -64,6 +64,10 @@ targets:
   dev:
     mode: development
     default: true
+    presets:
+      # Development mode pauses schedules but not file-arrival/table-update triggers; pause them
+      # explicitly so dev jobs run only when started manually.
+      trigger_pause_status: PAUSED
     variables:
       env: dev
       governance_catalog: dev_delivery_gold

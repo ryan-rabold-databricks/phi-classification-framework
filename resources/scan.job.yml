@@ -10,7 +10,6 @@ resources:
       schedule:
         quartz_cron_expression: "0 0 6 ? * MON"
         timezone_id: ${var.business_timezone}
-        pause_status: ${var.scan_pause_status}
       parameters:
         - name: process_name
           default: ${var.env}_phi_classification_scan
@@ -38,6 +37,8 @@ resources:
           default: ${var.detect_orphaned_tags}
         - name: workbook_protection_password
           default: ${var.workbook_protection_password}
+        - name: allowed_values_override
+          default: ${var.allowed_values_override}
         - name: correction_column
           default: ""
         - name: correction_reason
@@ -80,6 +81,8 @@ resources:
                 - "{{job.parameters.detect_orphaned_tags}}"
                 - --workbook-protection-password
                 - "{{job.parameters.workbook_protection_password}}"
+                - --allowed-values-override
+                - "{{job.parameters.allowed_values_override}}"
                 - --correction-column
                 - "{{job.parameters.correction_column}}"
                 - --correction-reason
@@ -123,6 +126,8 @@ resources:
                 - "{{job.parameters.detect_orphaned_tags}}"
                 - --workbook-protection-password
                 - "{{job.parameters.workbook_protection_password}}"
+                - --allowed-values-override
+                - "{{job.parameters.allowed_values_override}}"
       environments:
         - environment_key: framework
           spec:

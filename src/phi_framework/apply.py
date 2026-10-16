@@ -32,7 +32,7 @@ class Application:
         self.s: Settings = rt.s
 
     def run(self) -> None:
-        policy = TagPolicy(self.rt.w, self.s.tag_key)
+        policy = TagPolicy(self.rt.w, self.s.tag_key, self.s.allowed_values_override)
         statuses = [c.PLANNED, c.APPLICATION_IN_PROGRESS] + ([c.APPLICATION_FAILED] if self.s.retry_failed else [])
         plans = self.rt.rows(
             f"""SELECT p.*, i.status AS item_status

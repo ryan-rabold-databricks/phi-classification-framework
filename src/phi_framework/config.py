@@ -35,6 +35,9 @@ class Settings:
     detect_orphaned_tags: bool = False
     retry_failed: bool = False
     workbook_protection_password: str = "phi-review"
+    # dev only: comma-separated allowed values used instead of the governed-tag policy (sandboxes
+    # where a tag policy cannot be created). Rejected in qa and prod.
+    allowed_values_override: str = ""
     # Correction request (scan job, on demand only)
     correction_column: str = ""
     correction_reason: str = ""
@@ -74,6 +77,8 @@ class Settings:
                 f"process_name {self.process_name!r} does not match this job; expected "
                 f"{self.env}_{expected_role!r}. Pass the logical job name, not the deployed name."
             )
+        if self.allowed_values_override and self.env != "dev":
+            raise ValueError("allowed_values_override is only permitted in dev; qa and prod must use the governed-tag policy")
         if not self.run_id or not self.run_id.isdigit():
             raise ValueError(f"run_id must be the Lakeflow job run id, got {self.run_id!r}")
 
@@ -94,6 +99,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     p.add_argument("--detect-orphaned-tags", default="false")
     p.add_argument("--retry-failed", default="false")
     p.add_argument("--workbook-protection-password", default="phi-review")
+    p.add_argument("--allowed-values-override", default="")
     p.add_argument("--correction-column", default="")
     p.add_argument("--correction-reason", default="")
     p.add_argument("--correction-requested-by", default="")
@@ -113,6 +119,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         detect_orphaned_tags=_bool(a.detect_orphaned_tags),
         retry_failed=_bool(a.retry_failed),
         workbook_protection_password=a.workbook_protection_password,
+        allowed_values_override=a.allowed_values_override.strip(),
         correction_column=a.correction_column.strip(),
         correction_reason=a.correction_reason.strip(),
         correction_requested_by=a.correction_requested_by.strip().lower(),

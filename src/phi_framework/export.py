@@ -39,7 +39,7 @@ class Export:
         self.created: list[str] = []
 
     def run(self) -> list[str]:
-        policy = TagPolicy(self.rt.w, self.s.tag_key)
+        policy = TagPolicy(self.rt.w, self.s.tag_key, self.s.allowed_values_override)
         allowed = sorted(policy.allowed)
         items = self.rt.rows(
             f"""WITH last_error AS (

@@ -40,7 +40,7 @@ class Scan:
     # ------------------------------------------------------------------
     def run(self) -> None:
         self._parse_correction()
-        policy = TagPolicy(self.rt.w, self.s.tag_key)
+        policy = TagPolicy(self.rt.w, self.s.tag_key, self.s.allowed_values_override)
         scopes = self._active_scopes()
         if not scopes:
             log.warning("No active scopes for environment %s; nothing to scan", self.s.env)

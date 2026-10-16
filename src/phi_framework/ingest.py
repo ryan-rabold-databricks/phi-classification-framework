@@ -62,7 +62,7 @@ class Ingestion:
     def __init__(self, rt: Runtime):
         self.rt = rt
         self.s: Settings = rt.s
-        self.policy = TagPolicy(rt.w, self.s.tag_key)
+        self.policy = TagPolicy(rt.w, self.s.tag_key, self.s.allowed_values_override)
         self.groups = GroupDirectory(rt.w)
         self.failures: list[str] = []
 
