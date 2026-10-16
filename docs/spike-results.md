@@ -18,7 +18,7 @@ reconfirmed in the customer's own workspace.
 
 ## End-to-end results
 
-`tests/integration/e2e_sandbox.py` passes 51/51 checks in two modes:
+`tests/integration/e2e_sandbox.py` passes 56/56 checks in two modes:
 
 - **Governed tag:** a real account-level tag policy (18 HIPAA-identifier values) with no
   override. Allowed values are read from the Tag Policy API, suggestions map to the
