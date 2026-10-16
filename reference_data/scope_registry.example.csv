@@ -1,0 +1,3 @@
+scope_id,catalog_name,schema_name,environment,risk_tier,steward_group,governance_owner,scan_enabled,effective_date,expiration_date
+SCOPE-CLINICAL-DEV,dev_clinical_gold,*,dev,STANDARD,clinical_data_stewards,data_governance,true,2026-10-01,
+SCOPE-CLINICAL-ENCOUNTER-DEV,dev_clinical_gold,encounter,dev,HIGH,clinical_data_stewards,data_governance,true,2026-10-01,

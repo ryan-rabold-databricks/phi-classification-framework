@@ -1,0 +1,33 @@
+class_tag,phi_tag_value,is_active,notes
+class.age,date,true,"Ages over 89 are PHI; younger ages are reviewed by the steward."
+class.bank_number,financial,true,
+class.us_bank_number,financial,true,"US-specific variant of class.bank_number."
+class.biometric_data,biometric_identifier,true,
+class.card_track_data,financial,true,
+class.credit_card,financial,true,
+class.date_of_birth,date,true,
+class.medical_date,date,true,
+class.driver_license,certificate_license,true,"Review: license number fits certificate_license better than patient_identifier."
+class.us_driver_license,certificate_license,true,"US-specific variant of class.driver_license."
+class.email_address,email_address,true,
+class.health_plan_beneficiary_number,patient_identifier,true,"Review: beneficiary/member numbers are identifiers, not payer names."
+class.iban_code,financial,true,
+class.imei,serial_numbers,true,
+class.mac_address,serial_numbers,true,
+class.medical_device_id,serial_numbers,true,
+class.ip_address,ip_address,true,
+class.license_plate,license_plates,true,
+class.location,location,true,
+class.street_address,location,true,"Street addresses are geographic subdivisions smaller than a state."
+class.medical_license,certificate_license,true,
+class.medical_record_number,mrn,true,
+class.name,name,true,
+class.passport,patient_identifier,true,"Review: government-issued identifier; confirm the intended value."
+class.us_passport,patient_identifier,true,"US-specific variant of class.passport; confirm the intended value."
+class.phone_number,telephone_number,true,
+class.url,web_url,true,
+class.vin,vehicle_identifier,true,
+class.gender,gender,true,
+class.ethnicity,ethnicity,true,
+class.health_data,clinical,true,
+class.us_ssn,ssn,true,

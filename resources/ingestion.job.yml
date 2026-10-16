@@ -1,0 +1,127 @@
+# <env>_phi_decision_ingestion: runs when returned workbooks land in the Volume's inbound/ folder,
+# then exports follow-up workbooks (steward review after assignment, Privacy, rejected decisions).
+resources:
+  jobs:
+    phi_decision_ingestion:
+      name: ${var.env}_phi_decision_ingestion
+      max_concurrent_runs: 1
+      email_notifications:
+        on_failure: ${var.failure_notification_emails}
+      trigger:
+        pause_status: UNPAUSED
+        file_arrival:
+          url: /Volumes/${var.governance_catalog}/${var.governance_schema}/classification_review_files/inbound/
+          min_time_between_triggers_seconds: 60
+          wait_after_last_change_seconds: 120
+      parameters:
+        - name: process_name
+          default: ${var.env}_phi_decision_ingestion
+        - name: env
+          default: ${var.env}
+        - name: run_id
+          default: "{{job.run_id}}"
+        - name: governance_catalog
+          default: ${var.governance_catalog}
+        - name: governance_schema
+          default: ${var.governance_schema}
+        - name: governed_catalog_prefix
+          default: ${var.governed_catalog_prefix}
+        - name: tag_key
+          default: ${var.tag_key}
+        - name: governance_group
+          default: ${var.governance_group}
+        - name: data_classification_table
+          default: ${var.data_classification_table}
+        - name: review_due_business_days
+          default: ${var.review_due_business_days}
+        - name: business_timezone
+          default: ${var.business_timezone}
+        - name: detect_orphaned_tags
+          default: ${var.detect_orphaned_tags}
+        - name: workbook_protection_password
+          default: ${var.workbook_protection_password}
+      tasks:
+        - task_key: ingest
+          environment_key: framework
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          timeout_seconds: 7200
+          python_wheel_task:
+            package_name: phi_framework
+            entry_point: ingest
+            parameters:
+                - --env
+                - "{{job.parameters.env}}"
+                - --process-name
+                - "{{job.parameters.process_name}}"
+                - --run-id
+                - "{{job.parameters.run_id}}"
+                - --governance-catalog
+                - "{{job.parameters.governance_catalog}}"
+                - --governance-schema
+                - "{{job.parameters.governance_schema}}"
+                - --governed-catalog-prefix
+                - "{{job.parameters.governed_catalog_prefix}}"
+                - --tag-key
+                - "{{job.parameters.tag_key}}"
+                - --governance-group
+                - "{{job.parameters.governance_group}}"
+                - --data-classification-table
+                - "{{job.parameters.data_classification_table}}"
+                - --review-due-business-days
+                - "{{job.parameters.review_due_business_days}}"
+                - --business-timezone
+                - "{{job.parameters.business_timezone}}"
+                - --detect-orphaned-tags
+                - "{{job.parameters.detect_orphaned_tags}}"
+                - --workbook-protection-password
+                - "{{job.parameters.workbook_protection_password}}"
+        - task_key: export_workbooks
+          depends_on:
+            - task_key: ingest
+          run_if: ALL_DONE
+          environment_key: framework
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          timeout_seconds: 7200
+          python_wheel_task:
+            package_name: phi_framework
+            entry_point: export
+            parameters:
+                - --env
+                - "{{job.parameters.env}}"
+                - --process-name
+                - "{{job.parameters.process_name}}"
+                - --run-id
+                - "{{job.parameters.run_id}}"
+                - --governance-catalog
+                - "{{job.parameters.governance_catalog}}"
+                - --governance-schema
+                - "{{job.parameters.governance_schema}}"
+                - --governed-catalog-prefix
+                - "{{job.parameters.governed_catalog_prefix}}"
+                - --tag-key
+                - "{{job.parameters.tag_key}}"
+                - --governance-group
+                - "{{job.parameters.governance_group}}"
+                - --data-classification-table
+                - "{{job.parameters.data_classification_table}}"
+                - --review-due-business-days
+                - "{{job.parameters.review_due_business_days}}"
+                - --business-timezone
+                - "{{job.parameters.business_timezone}}"
+                - --detect-orphaned-tags
+                - "{{job.parameters.detect_orphaned_tags}}"
+                - --workbook-protection-password
+                - "{{job.parameters.workbook_protection_password}}"
+      environments:
+        - environment_key: framework
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ../dist/*.whl
+      permissions:
+        - group_name: ${var.platform_group}
+          level: CAN_MANAGE
+        - group_name: ${var.governance_group}
+          level: CAN_MANAGE_RUN

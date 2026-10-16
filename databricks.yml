@@ -1,0 +1,94 @@
+# PHI Classification Framework -- Declarative Automation Bundle.
+#
+# One bundle, one target per environment. Each target deploys the same jobs to
+# its own workspace and governance catalog and processes only that
+# environment's catalogs.
+#
+# Workspace hosts are intentionally not hard-coded: deploy with a CLI profile
+# (`-p <profile>`) locally, or DATABRICKS_HOST / OAuth M2M credentials in CI.
+bundle:
+  name: phi_classification_framework
+
+include:
+  - resources/*.yml
+
+artifacts:
+  phi_framework_wheel:
+    type: whl
+    build: uv build --wheel
+
+variables:
+  env:
+    description: Deployment environment (dev, qa, prod). Logical job names are <env>_phi_<job>.
+  governance_catalog:
+    description: Catalog that holds the governance schema (for example <env>_delivery_gold).
+  governance_schema:
+    description: Governance schema name.
+    default: data_governance
+  governed_catalog_prefix:
+    description: Every governed catalog in this environment starts with this prefix (environment guardrail).
+  tag_key:
+    description: Governed tag applied to PHI columns. Its allowed values come from the tag policy.
+    default: phi_classification
+  governance_group:
+    description: Data Governance group (may record Privacy outcomes, request corrections, run the scan on demand).
+  platform_group:
+    description: Data Platform group that operates the jobs.
+  data_classification_table:
+    description: Data Classification results table. Set to "" to disable suggestions.
+    default: system.data_classification.results
+  review_due_business_days:
+    description: Business days stewards have to complete a batch.
+    default: "10"
+  business_timezone:
+    description: IANA time zone for the scan schedule and batch due times (17:00 local).
+    default: UTC
+  detect_orphaned_tags:
+    description: Open ORPHANED_TAG items for tags without framework review evidence. Off for the pilot.
+    default: "false"
+  workbook_protection_password:
+    description: Excel sheet-protection password. Prevents accidental edits only; it is not a security control.
+    default: phi-review
+  scan_pause_status:
+    description: PAUSED or UNPAUSED for the weekly schedule (development mode always pauses).
+    default: UNPAUSED
+  framework_service_principal:
+    description: Application ID of the framework service principal (qa and prod run as this identity).
+    default: ""
+  failure_notification_emails:
+    description: Addresses notified when any framework job fails.
+    type: complex
+    default: []
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      env: dev
+      governance_catalog: dev_delivery_gold
+      governed_catalog_prefix: dev_
+      governance_group: data_governance
+      platform_group: data_platform
+
+  qa:
+    mode: production
+    variables:
+      env: qa
+      governance_catalog: qa_delivery_gold
+      governed_catalog_prefix: qa_
+      governance_group: data_governance
+      platform_group: data_platform
+    run_as:
+      service_principal_name: ${var.framework_service_principal}
+
+  prod:
+    mode: production
+    variables:
+      env: prod
+      governance_catalog: prod_delivery_gold
+      governed_catalog_prefix: prod_
+      governance_group: data_governance
+      platform_group: data_platform
+    run_as:
+      service_principal_name: ${var.framework_service_principal}

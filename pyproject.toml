@@ -1,0 +1,41 @@
+[project]
+name = "phi_framework"
+version = "1.0.0"
+description = "Unity Catalog PHI classification audit framework (scan, steward review, tag application)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "openpyxl>=3.1,<3.2",
+    "databricks-sdk>=0.70",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+setup = "phi_framework.cli:setup"
+scan = "phi_framework.cli:scan"
+export = "phi_framework.cli:export"
+ingest = "phi_framework.cli:ingest"
+apply = "phi_framework.cli:apply"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/phi_framework"]
+
+[tool.ruff]
+line-length = 130
+
+[tool.ruff.lint]
+# Timestamps are naive UTC by convention (the Spark session time zone is pinned to UTC).
+# Broad exception handlers are deliberate where one item's failure must not stop the run.
+ignore = ["DTZ001", "DTZ005", "DTZ007", "BLE001"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests/unit"]
