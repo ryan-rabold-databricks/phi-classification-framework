@@ -76,6 +76,15 @@ class E2E:
         self.finance = f"{a.test_schema_prefix}_finance"
         self.support = f"{a.test_schema_prefix}_support"
         self.vol = f"/Volumes/{self.gc}/{self.gs}/{c.V_FILES}"
+        # Governed mode: a real tag policy enforces allowed values, so an invalid pre-existing tag
+        # cannot be staged. The test pre-tags a valid value without review evidence instead and
+        # runs scans with ORPHANED_TAG detection on.
+        self.governed = not self.v.get("allowed_values_override")
+        with open(os.path.join(ROOT, a.mapping), newline="") as fh:
+            import csv
+
+            self.mapping = {r["class_tag"]: r["phi_tag_value"] for r in csv.DictReader(fh)}
+        self.scan_params = {"detect_orphaned_tags": "true"} if self.governed else {}
 
     # ---------------- helpers ----------------
     def t(self, name: str) -> str:
@@ -179,7 +188,8 @@ class E2E:
         self.q(f"""CREATE OR REPLACE TABLE {fqn(C, self.clinical, 'lab_result')} (
             patient_mrn STRING COMMENT 'MRN of the patient', result_value DOUBLE COMMENT 'Numeric result',
             legacy_flag STRING COMMENT 'Pre-tagged with a value that is not allowed')""")
-        self.q(f"ALTER TABLE {fqn(C, self.clinical, 'lab_result')} ALTER COLUMN legacy_flag SET TAGS ({lit(self.tag)} = 'retired_value')")
+        pre_tag = self.mapping["class.name"] if self.governed else "retired_value"
+        self.q(f"ALTER TABLE {fqn(C, self.clinical, 'lab_result')} ALTER COLUMN legacy_flag SET TAGS ({lit(self.tag)} = {lit(pre_tag)})")
         self.q(f"""CREATE OR REPLACE TABLE {fqn(C, self.finance, 'billing')} (
             account_number STRING COMMENT 'Billing account number', amount DECIMAL(10,2) COMMENT 'Charge amount',
             patient_email STRING COMMENT 'Patient email address')""")
@@ -225,7 +235,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         subprocess.run(
             ["uv", "run", "--quiet", "python", "tools/load_reference_data.py", "-p", self.a.profile, "--warehouse-id",
              self.a.warehouse_id, "--catalog", self.gc, "--schema", self.gs, "--scopes", path,
-             "--mapping", "reference_data/suggestion_mapping.csv"], check=True, cwd=ROOT,
+             "--mapping", self.a.mapping], check=True, cwd=ROOT,
         )
         self.stewards = stewards
 
@@ -244,18 +254,22 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         self.run_job("phi_framework_setup")
 
         print("== 2. First scan")
-        self.run_job("phi_classification_scan")
+        self.run_job("phi_classification_scan", self.scan_params)
         batches = self.q(f"SELECT * FROM {self.t(c.T_BATCH)}")
         check("two batches (one per scope)", len(batches) == 2, str(len(batches)))
         pn = self.item(cl, "patient_encounter", "patient_name")
         check("MISSING_CLASSIFICATION opened", pn and pn["issue_type"] == c.MISSING_CLASSIFICATION)
-        check("suggestion from DC", pn["suggested_tag_value"] == "name", str(pn["suggested_tag_value"]))
+        check("suggestion from DC", pn["suggested_tag_value"] == self.mapping["class.name"], str(pn["suggested_tag_value"]))
         check("conflicting detections -> no suggestion", self.item(cl, "patient_encounter", "notes")["suggested_tag_value"] is None)
         check("LOW confidence -> no suggestion", self.item(cl, "patient_encounter", "encounter_date")["suggested_tag_value"] is None)
         check("two HIGH detections mapping to one value -> suggestion",
-              self.item(fi, "billing", "account_number")["suggested_tag_value"] == "financial")
-        check("invalid pre-existing tag -> INVALID_TAG_VALUE",
-              self.item(cl, "lab_result", "legacy_flag")["issue_type"] == c.INVALID_TAG_VALUE)
+              self.item(fi, "billing", "account_number")["suggested_tag_value"] == self.mapping["class.bank_number"])
+        if self.governed:
+            check("pre-existing tag without review evidence -> ORPHANED_TAG",
+                  self.item(cl, "lab_result", "legacy_flag")["issue_type"] == c.ORPHANED_TAG)
+        else:
+            check("invalid pre-existing tag -> INVALID_TAG_VALUE",
+                  self.item(cl, "lab_result", "legacy_flag")["issue_type"] == c.INVALID_TAG_VALUE)
         leaked = self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ITEM)} WHERE suggestion_reason LIKE '%SAMPLE-SECRET%'")
         check("DC sample values never copied", int(leaked) == 0)
         n_items = int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ITEM)}"))
@@ -264,7 +278,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         check("assignment workbook per batch", len(assign) == 2, str(assign))
 
         print("== 3. Rerun scan with unchanged metadata opens nothing")
-        self.run_job("phi_classification_scan")
+        self.run_job("phi_classification_scan", self.scan_params)
         check("no new items or batches",
               int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ITEM)}")) == n_items
               and int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_BATCH)}")) == 2)
@@ -339,9 +353,9 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         print("== 7. Tag application")
         self.run_job("phi_classification_application")
         check("tag applied and verified", self.item(cl, "patient_encounter", "patient_name")["status"] == c.TAG_VERIFIED
-              and self.tag_value(cl, "patient_encounter", "patient_name") == "name")
+              and self.tag_value(cl, "patient_encounter", "patient_name") == self.mapping["class.name"])
         check("corrected value applied", self.tag_value(cl, "patient_encounter", "encounter_date") == "date")
-        check("invalid tag removed -> ATTESTED_NOT_PHI", self.item(cl, "lab_result", "legacy_flag")["status"] == c.ATTESTED_NOT_PHI
+        check("unreviewed tag removed -> ATTESTED_NOT_PHI", self.item(cl, "lab_result", "legacy_flag")["status"] == c.ATTESTED_NOT_PHI
               and self.tag_value(cl, "lab_result", "legacy_flag") is None)
         if self.mv:
             check("MV column tagged", self.tag_value(cl, "encounter_summary_mv", "mrn") == "mrn")
@@ -358,7 +372,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         self.run_job("phi_decision_ingestion")
         check("privacy outcome -> ATTESTED_NOT_PHI", self.item(cl, "patient_encounter", "notes")["status"] == c.ATTESTED_NOT_PHI)
         check("change to accepted item ignored", len(self.events(c.EV_CHANGE_IGNORED)) >= 1
-              and self.tag_value(cl, "patient_encounter", "patient_name") == "name")
+              and self.tag_value(cl, "patient_encounter", "patient_name") == self.mapping["class.name"])
         follow_ups = [p for p in self.outbound(c.WB_REVIEW) if p not in reviews]
         check("follow-up review workbooks exported", len(follow_ups) >= 1, str(follow_ups))
         fix = {
@@ -390,22 +404,22 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         self.q(f"ALTER TABLE {fqn(self.cat, cl, 'patient_encounter')} ALTER COLUMN source_system_code COMMENT 'Changed purpose'")
         self.q(f"ALTER TABLE {fqn(self.cat, cl, 'patient_encounter')} ALTER COLUMN ssn COMMENT 'SSN (changed)'")
         self.q(f"CREATE OR REPLACE TABLE {fqn(self.cat, fi, 'temp_drop')} (x STRING)")
-        self.run_job("phi_classification_scan")
+        self.run_job("phi_classification_scan", self.scan_params)
         check("STALE_NON_PHI_ATTESTATION", self.item(cl, "patient_encounter", "source_system_code", True)["issue_type"] == c.STALE_NON_PHI_ATTESTATION)
         check("STALE_PHI_REVIEW", self.item(cl, "patient_encounter", "ssn", True)["issue_type"] == c.STALE_PHI_REVIEW)
         check("new table -> MISSING_CLASSIFICATION", self.item(fi, "temp_drop", "x", True)["issue_type"] == c.MISSING_CLASSIFICATION)
         self.q(f"DROP TABLE {fqn(self.cat, fi, 'temp_drop')}")
-        self.run_job("phi_classification_scan")
+        self.run_job("phi_classification_scan", self.scan_params)
         check("removed column -> CLOSED_NO_ACTION", self.item(fi, "temp_drop", "x")["status"] == c.CLOSED_NO_ACTION)
 
         print("== 11. Correction request and tag removal on a verified PHI column")
         col = f"{self.cat}.{cl}.patient_encounter.mrn"
-        self.run_job("phi_classification_scan", {"correction_column": col, "correction_reason": "E2E correction test",
+        self.run_job("phi_classification_scan", {**self.scan_params, "correction_column": col, "correction_reason": "E2E correction test",
                                                  "correction_requested_by": self.me})
         corr = self.item(cl, "patient_encounter", "mrn", True)
         check("CORRECTION_REQUESTED opened with current tag pre-filled",
-              corr and corr["issue_type"] == c.CORRECTION_REQUESTED and corr["suggested_tag_value"] == "mrn")
-        self.run_job("phi_classification_scan", {"correction_column": f"{self.cat}.{cl}.patient_encounter.ssn",
+              corr and corr["issue_type"] == c.CORRECTION_REQUESTED and corr["suggested_tag_value"] == self.mapping["class.medical_record_number"])
+        self.run_job("phi_classification_scan", {**self.scan_params, "correction_column": f"{self.cat}.{cl}.patient_encounter.ssn",
                                                  "correction_reason": "already open", "correction_requested_by": self.me})
         check("no second item when one is open", int(self.sql.scalar(
             f"SELECT count(*) FROM {self.t(c.T_ITEM)} WHERE column_name = 'ssn' AND status NOT IN ('TAG_VERIFIED','ATTESTED_NOT_PHI','CLOSED_NO_ACTION')")) == 1)
@@ -442,6 +456,8 @@ def main() -> None:
     ap.add_argument("--test-schema-prefix", default="phifw_test")
     ap.add_argument("--reset", action="store_true")
     ap.add_argument("--skip-mv", action="store_true")
+    ap.add_argument("--mapping", default="reference_data/suggestion_mapping.csv",
+                    help="Suggestion mapping CSV whose values match the tag's allowed values")
     a = ap.parse_args()
     try:
         E2E(a).run()

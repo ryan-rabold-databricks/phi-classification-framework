@@ -313,8 +313,15 @@ uv run ruff check src tests tools
 
 # End-to-end against a dev sandbox with synthetic data
 uv run --with openpyxl python tests/integration/e2e_sandbox.py \
-    -p <profile> --warehouse-id <id> --reset
+    -p <profile> --warehouse-id <id> --reset \
+    --mapping <mapping CSV whose values match the tag policy>
 ```
+
+`--mapping` must point to a mapping whose values exist in your tag policy.
+`tests/integration/fixtures/suggestion_mapping_hipaa18.csv` targets an 18-identifier
+HIPAA value list (`name`, `address`, `date`, `phone_number`, `ssn`, `mrn`, `account_number`, ...).
+With a governed tag, the test exercises `ORPHANED_TAG` instead of `INVALID_TAG_VALUE`,
+because Unity Catalog rejects values outside the policy.
 
 The end-to-end test seeds synthetic tables, a materialized view, and synthetic
 Data Classification results. It then drives the real jobs through assignment,

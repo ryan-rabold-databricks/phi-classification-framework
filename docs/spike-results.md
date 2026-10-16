@@ -16,6 +16,19 @@ reconfirmed in the customer's own workspace.
 | S-04b | Group membership for `reviewed_by` / `assigned_steward` checks | **Works** through the workspace SCIM API (`groups.list(filter='displayName eq "<group>"', attributes="members")`) for both account and workspace groups. Only direct members come back, as IDs: nested groups must be expanded and user IDs resolved to user names (implemented in `directory.py`). *Customer:* confirm with the service principal. |
 | S-05 | Excel on serverless | `openpyxl` is **not** preinstalled in serverless environment 4 and must be a job dependency (it is a wheel dependency here). Writing a workbook straight to a Volume path fails (`OSError: [Errno 5]`), because zip writes need random access. Build workbooks in memory and write the bytes in one call. Locked cells, dropdown lists, hidden sheets, and Text-formatted cells all round-trip correctly. |
 
+## End-to-end results
+
+`tests/integration/e2e_sandbox.py` passes 51/51 checks in two modes:
+
+- **Governed tag:** a real account-level tag policy (18 HIPAA-identifier values) with no
+  override. Allowed values are read from the Tag Policy API, suggestions map to the
+  policy's values, and Unity Catalog rejects any tag value outside the policy
+  (`UC_TAG_POLICY_VALUE_NOT_ALLOWED`). Because an invalid value cannot be staged under a
+  governed tag, this mode exercises `ORPHANED_TAG` (a pre-existing tag with no review
+  evidence) instead of `INVALID_TAG_VALUE`.
+- **Override:** an ungoverned tag with `allowed_values_override` (dev only), which allows an
+  invalid pre-existing value and so exercises `INVALID_TAG_VALUE`.
+
 ## Deployment findings
 
 - `information_schema.tables` lists pipeline-internal objects as `MANAGED` tables in the
