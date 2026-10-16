@@ -64,7 +64,10 @@ implementation adds to, interprets, or deviates from that design, and why.
 15. **Empty-catalog guard.** If a catalog with open items returns no columns, the scan
     stops instead of closing those items (lost privileges or bindings look identical to
     an emptied catalog).
-16. **Due dates** are 17:00 in `business_timezone`, `review_due_business_days`
+16. **Pipeline-internal tables are excluded** (`excluded_table_regex`): materialized-view
+    backing tables and pipeline event-log tables appear in `information_schema` as
+    `MANAGED` tables but are not business data.
+17. **Due dates** are 17:00 in `business_timezone`, `review_due_business_days`
     business days after the batch is created. Holidays are not modeled.
 
 ## Open items for the customer

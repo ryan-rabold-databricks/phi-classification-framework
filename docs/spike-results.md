@@ -18,6 +18,16 @@ reconfirmed in the customer's own workspace.
 
 ## Deployment findings
 
+- `information_schema.tables` lists pipeline-internal objects as `MANAGED` tables in the
+  user's schema: materialized-view backing tables (`__materialization_mat_<uuid>_<mv>_1`)
+  and published pipeline event logs (`event_log_<pipeline uuid>`). Without an exclusion,
+  one materialized view added 12 spurious review items. The scan skips tables that match
+  `excluded_table_regex` (default `^__|^event_log_<uuid>$`).
+- Serverless statement latency dominates the application job, at about 1-2 s per SQL
+  statement. The first implementation issued about 10 statements per column (about 14 s per
+  column). The application job now batches status changes, prechecks, and verification
+  into set-based statements, leaving one tag DDL statement per column.
+
 - Development mode paused the schedule but **did not** pause file-arrival or
   table-update triggers. `presets.trigger_pause_status: PAUSED` on the dev
   target pauses them, provided the job YAML does not set `pause_status` explicitly.
