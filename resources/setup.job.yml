@@ -36,6 +36,8 @@ resources:
           default: ${var.workbook_protection_password}
         - name: allowed_values_override
           default: ${var.allowed_values_override}
+        - name: excluded_table_regex
+          default: ${var.excluded_table_regex}
       tasks:
         - task_key: setup
           environment_key: framework
@@ -74,6 +76,8 @@ resources:
                 - "{{job.parameters.workbook_protection_password}}"
                 - --allowed-values-override
                 - "{{job.parameters.allowed_values_override}}"
+                - --excluded-table-regex
+                - "{{job.parameters.excluded_table_regex}}"
       environments:
         - environment_key: framework
           spec:

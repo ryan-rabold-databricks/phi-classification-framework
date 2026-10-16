@@ -55,6 +55,9 @@ variables:
   framework_service_principal:
     description: Application ID of the framework service principal (qa and prod run as this identity).
     default: ""
+  excluded_table_regex:
+    description: Tables matching this regex are never scanned (defaults exclude pipeline-internal backing tables and event logs).
+    default: "^__|^event_log_[0-9a-f]{8}(_[0-9a-f]{4}){3}_[0-9a-f]{12}$"
   failure_notification_emails:
     description: Addresses notified when any framework job fails.
     type: complex

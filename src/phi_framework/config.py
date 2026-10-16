@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from phi_framework import constants as c
 
 _IDENT = re.compile(r"^[A-Za-z0-9_]+$")
+DEFAULT_EXCLUDED_TABLE_REGEX = r"^__|^event_log_[0-9a-f]{8}(_[0-9a-f]{4}){3}_[0-9a-f]{12}$"
 
 
 def _bool(v: str) -> bool:
@@ -38,6 +39,9 @@ class Settings:
     # dev only: comma-separated allowed values used instead of the governed-tag policy (sandboxes
     # where a tag policy cannot be created). Rejected in qa and prod.
     allowed_values_override: str = ""
+    # Pipeline-internal tables listed in information_schema as MANAGED: materialized-view backing
+    # tables (__materialization_*) and published pipeline event logs (event_log_<pipeline uuid>).
+    excluded_table_regex: str = DEFAULT_EXCLUDED_TABLE_REGEX
     # Correction request (scan job, on demand only)
     correction_column: str = ""
     correction_reason: str = ""
@@ -77,6 +81,8 @@ class Settings:
                 f"process_name {self.process_name!r} does not match this job; expected "
                 f"{self.env}_{expected_role!r}. Pass the logical job name, not the deployed name."
             )
+        if self.excluded_table_regex:
+            re.compile(self.excluded_table_regex)
         if self.allowed_values_override and self.env != "dev":
             raise ValueError("allowed_values_override is only permitted in dev; qa and prod must use the governed-tag policy")
         if not self.run_id or not self.run_id.isdigit():
@@ -100,6 +106,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     p.add_argument("--retry-failed", default="false")
     p.add_argument("--workbook-protection-password", default="phi-review")
     p.add_argument("--allowed-values-override", default="")
+    p.add_argument("--excluded-table-regex", default=DEFAULT_EXCLUDED_TABLE_REGEX)
     p.add_argument("--correction-column", default="")
     p.add_argument("--correction-reason", default="")
     p.add_argument("--correction-requested-by", default="")
@@ -120,6 +127,7 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         retry_failed=_bool(a.retry_failed),
         workbook_protection_password=a.workbook_protection_password,
         allowed_values_override=a.allowed_values_override.strip(),
+        excluded_table_regex=a.excluded_table_regex.strip(),
         correction_column=a.correction_column.strip(),
         correction_reason=a.correction_reason.strip(),
         correction_requested_by=a.correction_requested_by.strip().lower(),

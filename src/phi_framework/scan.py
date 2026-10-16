@@ -142,6 +142,7 @@ class Scan:
         ).createOrReplaceTempView("phi_scopes")
 
         gov_cat, gov_sch = self.s.governance_catalog, self.s.governance_schema
+        excluded = f"AND NOT c.table_name RLIKE {lit(self.s.excluded_table_regex)}" if self.s.excluded_table_regex else ""
         col_parts, tag_parts = [], []
         for cat in sorted({r["catalog_name"] for r in scopes}):
             cat_scopes = [r for r in scopes if r["catalog_name"] == cat]
@@ -166,6 +167,7 @@ class Scan:
                 WHERE c.table_schema <> 'information_schema'
                   AND NOT (c.table_catalog = {lit(gov_cat)} AND c.table_schema = {lit(gov_sch)})
                   AND t.table_type IN ({in_list(c.TABLE_TYPES)})
+                  {excluded}
                   {schema_filter}
                 QUALIFY row_number() OVER (
                   PARTITION BY c.table_catalog, c.table_schema, c.table_name, c.column_name

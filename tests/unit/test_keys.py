@@ -19,3 +19,15 @@ def test_fingerprint_normalizes_case_and_whitespace():
     assert a == b
     assert fingerprint("cat", "sch", "tbl", "col", "STRING", None) == fingerprint("cat", "sch", "tbl", "col", "STRING", "")
     assert a != fingerprint("cat", "sch", "tbl", "col", "STRING", "changed")
+
+
+def test_default_exclusion_regex_skips_pipeline_internal_tables():
+    import re
+
+    from phi_framework.config import DEFAULT_EXCLUDED_TABLE_REGEX
+
+    rx = re.compile(DEFAULT_EXCLUDED_TABLE_REGEX)
+    assert rx.search("__materialization_mat_8aa28cfc_fbd8_40b7_81d6_7a8f9fca284f_mv_1")
+    assert rx.search("event_log_8aa28cfc_fbd8_40b7_81d6_7a8f9fca284f")
+    assert not rx.search("event_log_business")
+    assert not rx.search("patient_encounter")
