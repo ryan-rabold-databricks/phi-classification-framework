@@ -42,8 +42,8 @@ implementation adds to, interprets, or deviates from that design, and why.
 8. **Governance-schema exclusion** applies to the governance schema inside the
    governance catalog (the design's illustrative query excluded any schema named
    `data_governance`).
-9. **Governed catalog prefix is a variable.** The design hard-codes
-   `<env>_bh_` naming. Here the CHECK constraint is
+9. **Governed catalog prefix is a variable.** The design hard-codes an
+   organization-specific `<env>_<org>_` naming convention. Here the CHECK constraint is
    `environment = '<env>' AND startswith(catalog_name, '<governed_catalog_prefix>')`.
 10. **Schema and Volume are created by the setup code, not as bundle resources**, so
     deploying into an existing schema never fails and `bundle destroy` never drops

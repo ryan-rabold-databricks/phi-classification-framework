@@ -23,8 +23,8 @@ def test_process_checks_allow_manual_only_on_reference_tables():
 
 
 def test_environment_guardrail_constraint():
-    scope = next(t for t in table_defs("qa", "qa_bh_") if t.name == c.T_SCOPE)
-    assert scope.checks["catalog_matches_environment"] == "environment = 'qa' AND startswith(catalog_name, 'qa_bh_')"
+    scope = next(t for t in table_defs("qa", "qa_hc_") if t.name == c.T_SCOPE)
+    assert scope.checks["catalog_matches_environment"] == "environment = 'qa' AND startswith(catalog_name, 'qa_hc_')"
 
 
 def test_create_sql_marks_append_only():

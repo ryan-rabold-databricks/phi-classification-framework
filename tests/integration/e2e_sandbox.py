@@ -153,7 +153,7 @@ class E2E:
         return dest
 
     @staticmethod
-    def now_local(offset_minutes: int = -60) -> str:
+    def now_local(offset_minutes: int = -1) -> str:
         t = datetime.now(timezone(timedelta(hours=-4))) + timedelta(minutes=offset_minutes)
         return t.strftime("%Y-%m-%d %H:%M -04:00")
 

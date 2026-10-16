@@ -9,3 +9,4 @@ __pycache__/
 *.xlsx
 !docs/**/*.xlsx
 .DS_Store
+uv.lock
