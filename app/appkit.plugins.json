@@ -126,12 +126,8 @@
       },
       "scaffolding": {
         "rules": {
-          "must": [
-            "Before init, ensure the SQL Warehouse passed via --set analytics.sql-warehouse.id is running"
-          ],
-          "should": [
-            "After init, ensure config/queries/ has at least one .sql file before running npm run typegen"
-          ]
+          "must": ["Before init, ensure the SQL Warehouse passed via --set analytics.sql-warehouse.id is running"],
+          "should": ["After init, ensure config/queries/ has at least one .sql file before running npm run typegen"]
         }
       }
     },
@@ -166,9 +162,7 @@
       },
       "scaffolding": {
         "rules": {
-          "must": [
-            "Before init, verify your Unity Catalog volume exists and you have WRITE_VOLUME permission"
-          ]
+          "must": ["Before init, verify your Unity Catalog volume exists and you have WRITE_VOLUME permission"]
         }
       }
     },
@@ -206,9 +200,7 @@
       },
       "scaffolding": {
         "rules": {
-          "must": [
-            "After init, configure the 'spaces' map in plugin config with alias-to-Space-ID mappings"
-          ]
+          "must": ["After init, configure the 'spaces' map in plugin config with alias-to-Space-ID mappings"]
         }
       }
     },
@@ -254,9 +246,7 @@
               "project": {
                 "description": "Full Lakebase Postgres project resource name. Obtain by running `databricks postgres list-projects`, select the desired item from the output array and use its .name value.",
                 "bundleIgnore": true,
-                "examples": [
-                  "projects/{project-id}"
-                ],
+                "examples": ["projects/{project-id}"],
                 "discovery": {
                   "type": "kind",
                   "resourceKind": "postgres_project",
@@ -266,9 +256,7 @@
               },
               "branch": {
                 "description": "Full Lakebase Postgres branch resource name. Obtain by running `databricks postgres list-branches {project-name}`, select the desired item from the output array and use its .name value. Requires the project resource name.",
-                "examples": [
-                  "projects/{project-id}/branches/{branch-id}"
-                ],
+                "examples": ["projects/{project-id}/branches/{branch-id}"],
                 "discovery": {
                   "type": "kind",
                   "resourceKind": "postgres_branch",
@@ -279,9 +267,7 @@
               },
               "database": {
                 "description": "Full Lakebase Postgres database resource name. Obtain by running `databricks postgres list-databases {branch-name}`, select the desired item from the output array and use its .name value. Requires the branch resource name.",
-                "examples": [
-                  "projects/{project-id}/branches/{branch-id}/databases/{database-id}"
-                ],
+                "examples": ["projects/{project-id}/branches/{branch-id}/databases/{database-id}"],
                 "discovery": {
                   "type": "kind",
                   "resourceKind": "postgres_database",
@@ -308,9 +294,7 @@
                 "env": "LAKEBASE_ENDPOINT",
                 "description": "Lakebase endpoint resource name. Auto-injected at runtime via app.yaml valueFrom: postgres. For local development, obtain by running `databricks postgres list-endpoints {branch-name}`, select the desired item from the output array and use its .name value.",
                 "bundleIgnore": true,
-                "examples": [
-                  "projects/{project-id}/branches/{branch-id}/endpoints/{endpoint-id}"
-                ],
+                "examples": ["projects/{project-id}/branches/{branch-id}/endpoints/{endpoint-id}"],
                 "resolve": "postgres:endpointPath",
                 "origin": "cli"
               },
@@ -430,9 +414,7 @@
         "Treat `databricks apps init` output as starter code, not requirements; adapt or replace it to match the requested app",
         "Keep all secrets and credentials only in app.yaml, databricks.yml, and/or .env"
       ],
-      "should": [
-        "ask user when in doubt of resource to use for plugin"
-      ],
+      "should": ["ask user when in doubt of resource to use for plugin"],
       "never": [
         "guess resources when multiple or no options are available",
         "embed secrets in files that will go to the client-bundle"

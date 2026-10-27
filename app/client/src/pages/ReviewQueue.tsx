@@ -66,7 +66,9 @@ export function ReviewQueue({ kind, batchFilter }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const privacy = kind === 'privacy';
-  const decisions = (Object.keys(DECISION_LABELS) as Decision[]).filter((d) => !(privacy && d === 'REQUEST_PRIVACY_REVIEW'));
+  const decisions = (Object.keys(DECISION_LABELS) as Decision[]).filter(
+    (d) => !(privacy && d === 'REQUEST_PRIVACY_REVIEW')
+  );
 
   const load = useCallback(async () => {
     setError(null);
@@ -87,7 +89,7 @@ export function ReviewQueue({ kind, batchFilter }: Props) {
 
   const visible = useMemo(
     () => (items ?? []).filter((i) => !batchFilter || i.review_batch_id === batchFilter),
-    [items, batchFilter],
+    [items, batchFilter]
   );
   const actionable = visible.filter((i) => !i.awaiting_validation_since);
   const ready: DecisionDraft[] = actionable
@@ -103,7 +105,8 @@ export function ReviewQueue({ kind, batchFilter }: Props) {
       };
     });
 
-  const setDraft = (id: string, patch: Drafts[string]) => setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+  const setDraft = (id: string, patch: Drafts[string]) =>
+    setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
 
   const approveSelected = () => {
     for (const id of selected) {
@@ -120,7 +123,7 @@ export function ReviewQueue({ kind, batchFilter }: Props) {
       const r = await api.submit(privacy ? 'PRIVACY' : 'REVIEW', ready);
       setNotice(
         `Submitted ${r.submitted} decision(s). Validation usually completes within a few minutes; ` +
-          'rejected decisions return to this list with the reason.',
+          'rejected decisions return to this list with the reason.'
       );
       setDrafts({});
       setSelected(new Set());
@@ -265,7 +268,11 @@ export function ReviewQueue({ kind, batchFilter }: Props) {
                         {i.current_tag_value && (
                           <div className="text-xs text-muted-foreground mt-1">Current tag: {i.current_tag_value}</div>
                         )}
-                        {waiting && <Badge className="mt-1" variant="secondary">Submitted, awaiting validation</Badge>}
+                        {waiting && (
+                          <Badge className="mt-1" variant="secondary">
+                            Submitted, awaiting validation
+                          </Badge>
+                        )}
                         {errors.length > 0 && (
                           <div className="text-xs text-destructive mt-1">Returned: {errors.join('; ')}</div>
                         )}
@@ -292,14 +299,21 @@ export function ReviewQueue({ kind, batchFilter }: Props) {
                           </SelectTrigger>
                           <SelectContent>
                             {decisions.map((k) => (
-                              <SelectItem key={k} value={k} disabled={k === 'APPROVE_SUGGESTION' && !i.suggested_tag_value}>
+                              <SelectItem
+                                key={k}
+                                value={k}
+                                disabled={k === 'APPROVE_SUGGESTION' && !i.suggested_tag_value}
+                              >
                                 {DECISION_LABELS[k]}
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
                         {d.decision === 'CORRECT_CLASSIFICATION' && (
-                          <Select value={d.corrected ?? ''} onValueChange={(v) => setDraft(i.review_item_id, { corrected: v })}>
+                          <Select
+                            value={d.corrected ?? ''}
+                            onValueChange={(v) => setDraft(i.review_item_id, { corrected: v })}
+                          >
                             <SelectTrigger aria-label="Corrected value">
                               <SelectValue placeholder="Allowed value" />
                             </SelectTrigger>

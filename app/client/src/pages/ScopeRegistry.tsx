@@ -125,7 +125,9 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
     setCorrection({});
     try {
       const r = await api.requestCorrection(column.trim(), reason.trim());
-      setCorrection({ ok: `Scan run ${r.scanRunId} started. The new item appears in the reviewers' queue when it finishes.` });
+      setCorrection({
+        ok: `Scan run ${r.scanRunId} started. The new item appears in the reviewers' queue when it finishes.`,
+      });
       setColumn('');
       setReason('');
     } catch (err) {
@@ -249,7 +251,11 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
                 <Textarea id="corr-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
               </div>
             </div>
-            <Button variant="outline" disabled={!column.trim() || reason.trim().length < 5} onClick={() => void requestCorrection()}>
+            <Button
+              variant="outline"
+              disabled={!column.trim() || reason.trim().length < 5}
+              onClick={() => void requestCorrection()}
+            >
               Request correction
             </Button>
             {correction.ok && <p className="text-sm text-foreground">{correction.ok}</p>}
@@ -282,11 +288,19 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label htmlFor="scope-cat">Catalog</Label>
-                  <Input id="scope-cat" value={form.catalog_name} onChange={(e) => setForm({ ...form, catalog_name: e.target.value })} />
+                  <Input
+                    id="scope-cat"
+                    value={form.catalog_name}
+                    onChange={(e) => setForm({ ...form, catalog_name: e.target.value })}
+                  />
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor="scope-sch">Schema</Label>
-                  <Input id="scope-sch" value={form.schema_name} onChange={(e) => setForm({ ...form, schema_name: e.target.value })} />
+                  <Input
+                    id="scope-sch"
+                    value={form.schema_name}
+                    onChange={(e) => setForm({ ...form, schema_name: e.target.value })}
+                  />
                 </div>
               </div>
               <div className="space-y-1">

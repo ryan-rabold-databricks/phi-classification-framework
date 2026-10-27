@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Application, Request, Response } from 'express';
 import { getExecutionContext } from '@databricks/appkit';
 import { z } from 'zod';
-import { includes } from './lib/directory';
-import { userEmail } from './lib/identity';
+import { includes, principal, type Principal } from './lib/directory';
 import { checkDecision, DECISIONS, PRIVACY_STATUS, REVIEWABLE_STATUSES, type ActingAs } from './lib/rules';
 import { settings, table, T } from './lib/settings';
 import { runSql, type Row, type SqlValue } from './lib/sql';
@@ -39,7 +38,7 @@ class HttpError extends Error {
   constructor(
     readonly status: number,
     message: string,
-    readonly details?: unknown,
+    readonly details?: unknown
   ) {
     super(message);
   }
@@ -62,26 +61,26 @@ function handler(fn: (req: Request, res: Response) => Promise<void>) {
   };
 }
 
-function requireUser(req: Request): string {
-  const email = userEmail(req);
-  if (!email) throw new HttpError(401, 'No authenticated user on the request');
-  return email;
+async function requireUser(req: Request): Promise<Principal> {
+  const p = await principal(req);
+  if (!p) throw new HttpError(401, 'No authenticated user on the request');
+  return p;
 }
 
-async function loadMe(email: string): Promise<Me> {
+async function loadMe(p: Principal): Promise<Me> {
   const s = settings();
   const scopes = await runSql(
     `SELECT scope_id, catalog_name, schema_name, steward_group, governance_owner, risk_tier
      FROM ${table(T.scope)}
      WHERE environment = :env AND current_date() BETWEEN effective_date AND coalesce(expiration_date, DATE'9999-12-31')
      ORDER BY scope_id`,
-    { env: s.PHI_ENV },
+    { env: s.PHI_ENV }
   );
   const out: ScopeRole[] = [];
   for (const r of scopes) {
     const roles: ActingAs[] = [];
-    if (await includes(email, r.steward_group)) roles.push('STEWARD');
-    if (await includes(email, r.governance_owner)) roles.push('GOVERNANCE_OWNER');
+    if (includes(p, r.steward_group)) roles.push('STEWARD');
+    if (includes(p, r.governance_owner)) roles.push('GOVERNANCE_OWNER');
     out.push({
       scope_id: r.scope_id ?? '',
       catalog_name: r.catalog_name ?? '',
@@ -92,23 +91,29 @@ async function loadMe(email: string): Promise<Me> {
       roles,
     });
   }
-  return { email, env: s.PHI_ENV, isGovernance: await includes(email, s.PHI_GOVERNANCE_GROUP), scopes: out };
+  return { email: p.email, env: s.PHI_ENV, isGovernance: includes(p, s.PHI_GOVERNANCE_GROUP), scopes: out };
 }
 
 async function requireGovernance(req: Request): Promise<string> {
-  const email = requireUser(req);
-  if (!(await includes(email, settings().PHI_GOVERNANCE_GROUP))) {
+  const p = await requireUser(req);
+  if (!includes(p, settings().PHI_GOVERNANCE_GROUP)) {
     throw new HttpError(403, `Only members of ${settings().PHI_GOVERNANCE_GROUP} can do this`);
   }
-  return email;
+  return p.email;
 }
 
 async function allowedValues(): Promise<Set<string>> {
   const s = settings();
   if (s.PHI_ALLOWED_VALUES_OVERRIDE) {
-    return new Set(s.PHI_ALLOWED_VALUES_OVERRIDE.split(',').map((v) => v.trim()).filter(Boolean));
+    return new Set(
+      s.PHI_ALLOWED_VALUES_OVERRIDE.split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+    );
   }
-  const policy = await getExecutionContext().client.toLegacyWorkspaceClient().tagPolicies.getTagPolicy({ tag_key: s.PHI_TAG_KEY });
+  const policy = await getExecutionContext()
+    .client.toLegacyWorkspaceClient()
+    .tagPolicies.getTagPolicy({ tag_key: s.PHI_TAG_KEY });
   return new Set((policy.values ?? []).map((v: { name?: string }) => v.name).filter((v): v is string => !!v));
 }
 
@@ -141,13 +146,13 @@ async function queue(me: Me, kind: 'review' | 'privacy'): Promise<Row[]> {
             w.submitted_at AS awaiting_validation_since
      FROM ${table(T.item)} i
      JOIN ${table(T.batch)} b ON b.review_batch_id = i.review_batch_id
-     LEFT JOIN last_error e ON e.review_item_id = i.review_item_id AND e.event_timestamp >= i.audit_updated_at
+     LEFT JOIN last_error e ON e.review_item_id = i.review_item_id
      LEFT JOIN waiting w ON w.review_item_id = i.review_item_id
      WHERE array_contains(split(:scope_ids, ','), b.scope_id)
        AND array_contains(split(:statuses, ','), i.status)
      ORDER BY b.due_at, i.catalog_name, i.schema_name, i.table_name, i.column_name
      LIMIT 2000`,
-    { scope_ids: scopeIds.join(','), statuses: statuses.join(',') },
+    { scope_ids: scopeIds.join(','), statuses: statuses.join(',') }
   );
 }
 
@@ -172,7 +177,7 @@ async function writeEvent(
   actor: string,
   details: unknown,
   discriminator: string,
-  runId: string,
+  runId: string
 ): Promise<void> {
   const s = settings();
   await runSql(
@@ -189,7 +194,7 @@ async function writeEvent(
       actor,
       details: JSON.stringify(details),
       proc: s.processName,
-    },
+    }
   );
 }
 
@@ -220,34 +225,35 @@ export function registerRoutes(app: Application): void {
   app.get(
     '/api/review/me',
     handler(async (req, res) => {
-      res.json(await loadMe(requireUser(req)));
-    }),
+      res.json(await loadMe(await requireUser(req)));
+    })
   );
 
   app.get(
     '/api/review/allowed-values',
     handler(async (req, res) => {
-      requireUser(req);
+      await requireUser(req);
       res.json({ values: [...(await allowedValues())].sort() });
-    }),
+    })
   );
 
   app.get(
     '/api/review/queue',
     handler(async (req, res) => {
       const kind = req.query.kind === 'privacy' ? 'privacy' : 'review';
-      const me = await loadMe(requireUser(req));
+      const me = await loadMe(await requireUser(req));
       res.json({ items: await queue(me, kind), asOf: new Date().toISOString() });
-    }),
+    })
   );
 
   app.post(
     '/api/review/submissions',
     handler(async (req, res) => {
-      const email = requireUser(req);
+      const user = await requireUser(req);
+      const email = user.email;
       const body = SubmissionSchema.parse(req.body);
       const privacy = body.kind === 'PRIVACY';
-      const me = await loadMe(email);
+      const me = await loadMe(user);
       const allowed = await allowedValues();
       const ids = [...new Set(body.decisions.map((d) => d.review_item_id))];
       if (ids.length !== body.decisions.length) throw new HttpError(400, 'Each item may appear only once');
@@ -257,9 +263,9 @@ export function registerRoutes(app: Application): void {
             `SELECT i.review_item_id, i.review_batch_id, i.status, i.suggested_tag_value, b.scope_id
              FROM ${table(T.item)} i JOIN ${table(T.batch)} b ON b.review_batch_id = i.review_batch_id
              WHERE array_contains(split(:ids, ','), i.review_item_id)`,
-            { ids: ids.join(',') },
+            { ids: ids.join(',') }
           )
-        ).map((r) => [r.review_item_id ?? '', r]),
+        ).map((r) => [r.review_item_id ?? '', r])
       );
       const problems: Record<string, string[]> = {};
       for (const d of body.decisions) {
@@ -274,11 +280,17 @@ export function registerRoutes(app: Application): void {
           : !!scope && scope.roles.length > 0;
         const errors = authorized ? [] : ['You are not a reviewer for this scope'];
         errors.push(
-          ...checkDecision({ status: it.status ?? '', suggested_tag_value: it.suggested_tag_value }, d, privacy, allowed),
+          ...checkDecision(
+            { status: it.status ?? '', suggested_tag_value: it.suggested_tag_value },
+            d,
+            privacy,
+            allowed
+          )
         );
         if (errors.length) problems[d.review_item_id] = errors;
       }
-      if (Object.keys(problems).length) throw new HttpError(422, 'Some decisions need changes; nothing was submitted', problems);
+      if (Object.keys(problems).length)
+        throw new HttpError(422, 'Some decisions need changes; nothing was submitted', problems);
 
       // One submission set per batch, so ingestion validates and records each batch independently.
       const requestId = `APP-${randomUUID()}`;
@@ -304,44 +316,47 @@ export function registerRoutes(app: Application): void {
             [`${p}cmt`]: d.steward_comment?.trim() || null,
             [`${p}seen`]: d.suggested_tag_value_seen ?? null,
           });
-          rows.push(
-            `(${s.schemaFqn}.make_key('SUB', array(:${setKey}, :${p}item)), :${setKey}, :stype, :${p}batch, :${p}item,
-              :${p}dec, :${p}corr, :${p}cmt, :${p}seen, :by, current_timestamp(), ${auditValues()})`,
-          );
+          rows.push(`(:${setKey}, :${p}batch, :${p}item, :${p}dec, :${p}corr, :${p}cmt, :${p}seen)`);
         }
       }
+      // Keys are computed in the SELECT: an inline VALUES table cannot evaluate make_key's lambda.
       await runSql(
         `INSERT INTO ${table(T.submission)} (submission_id, submission_set_id, submission_type, review_batch_id,
            review_item_id, decision, corrected_tag_value, steward_comment, suggested_tag_value_seen, reviewed_by,
            reviewed_at, audit_created_at, audit_created_by, audit_created_process, audit_created_run_id)
-         VALUES ${rows.join(',\n')}`,
-        params,
+         SELECT ${s.schemaFqn}.make_key('SUB', array(v.set_id, v.item)), v.set_id, :stype, v.batch, v.item,
+           v.dec, v.corr, v.cmt, v.seen, :by, current_timestamp(), ${auditValues()}
+         FROM VALUES ${rows.join(',\n')} AS v(set_id, batch, item, dec, corr, cmt, seen)`,
+        params
       );
       res.json({ submitted: body.decisions.length, requestId });
-    }),
+    })
   );
 
   app.get(
     '/api/review/scopes',
     handler(async (req, res) => {
-      requireUser(req);
+      await requireUser(req);
       res.json({
         scopes: await runSql(
           `SELECT scope_id, catalog_name, schema_name, environment, risk_tier, steward_group, governance_owner,
                   scan_enabled, effective_date, expiration_date, audit_updated_at, audit_updated_by
            FROM ${table(T.scope)} WHERE environment = :env ORDER BY scope_id`,
-          { env: settings().PHI_ENV },
+          { env: settings().PHI_ENV }
         ),
         governedCatalogPrefix: settings().PHI_GOVERNED_CATALOG_PREFIX,
       });
-    }),
+    })
   );
 
   app.put(
     '/api/review/scopes/:scopeId',
     handler(async (req, res) => {
       const email = await requireGovernance(req);
-      const scopeId = z.string().regex(/^[A-Z0-9_-]{3,64}$/, 'Use SCOPE-<DOMAIN>-<ENV> in upper case').parse(req.params.scopeId);
+      const scopeId = z
+        .string()
+        .regex(/^[A-Z0-9_-]{3,64}$/, 'Use SCOPE-<DOMAIN>-<ENV> in upper case')
+        .parse(req.params.scopeId);
       const v = ScopeSchema.parse(req.body);
       const s = settings();
       if (!v.catalog_name.startsWith(s.PHI_GOVERNED_CATALOG_PREFIX)) {
@@ -379,36 +394,47 @@ export function registerRoutes(app: Application): void {
           exp: v.expiration_date ?? null,
           proc: s.processName,
           run: runId,
-        },
+        }
       );
-      await writeEvent('SCOPE_REGISTRY_UPDATED', email, { scope_id: scopeId, before, after: { ...v, environment: s.PHI_ENV } }, scopeId, runId);
+      await writeEvent(
+        'SCOPE_REGISTRY_UPDATED',
+        email,
+        { scope_id: scopeId, before, after: { ...v, environment: s.PHI_ENV } },
+        scopeId,
+        runId
+      );
       res.json({ saved: scopeId });
-    }),
+    })
   );
 
   app.get(
     '/api/review/mappings',
     handler(async (req, res) => {
-      requireUser(req);
+      await requireUser(req);
       res.json({
         mappings: await runSql(
           `SELECT class_tag, phi_tag_value, is_active, notes, audit_updated_at, audit_updated_by
-           FROM ${table(T.mapping)} ORDER BY class_tag`,
+           FROM ${table(T.mapping)} ORDER BY class_tag`
         ),
       });
-    }),
+    })
   );
 
   app.put(
     '/api/review/mappings/:classTag',
     handler(async (req, res) => {
       const email = await requireGovernance(req);
-      const classTag = z.string().trim().regex(/^class\.[a-z0-9_.]+$/, 'Use a Data Classification class such as class.name').parse(req.params.classTag);
+      const classTag = z
+        .string()
+        .trim()
+        .regex(/^class\.[a-z0-9_.]+$/, 'Use a Data Classification class such as class.name')
+        .parse(req.params.classTag);
       const v = MappingSchema.parse(req.body);
       if (!(await allowedValues()).has(v.phi_tag_value)) {
         throw new HttpError(422, `${v.phi_tag_value} is not an allowed value of the governed tag`);
       }
-      const before = (await runSql(`SELECT * FROM ${table(T.mapping)} WHERE class_tag = :k`, { k: classTag }))[0] ?? null;
+      const before =
+        (await runSql(`SELECT * FROM ${table(T.mapping)} WHERE class_tag = :k`, { k: classTag }))[0] ?? null;
       const runId = `APP-${randomUUID()}`;
       const s = settings();
       await runSql(
@@ -421,11 +447,18 @@ export function registerRoutes(app: Application): void {
            audit_created_at, audit_created_by, audit_created_process, audit_created_run_id,
            audit_updated_at, audit_updated_by, audit_updated_process, audit_updated_run_id)
          VALUES (:k, :val, :active, :notes, ${auditValues()}, ${auditValues()})`,
-        { k: classTag, val: v.phi_tag_value, active: v.is_active, notes: v.notes?.trim() || null, proc: s.processName, run: runId },
+        {
+          k: classTag,
+          val: v.phi_tag_value,
+          active: v.is_active,
+          notes: v.notes?.trim() || null,
+          proc: s.processName,
+          run: runId,
+        }
       );
       await writeEvent('SUGGESTION_MAPPING_UPDATED', email, { class_tag: classTag, before, after: v }, classTag, runId);
       res.json({ saved: classTag });
-    }),
+    })
   );
 
   app.post(
@@ -439,8 +472,14 @@ export function registerRoutes(app: Application): void {
         job_parameters: { correction_column: v.column, correction_reason: v.reason, correction_requested_by: email },
       });
       const runId = String(run.run_id ?? '');
-      await writeEvent('CORRECTION_REQUESTED', email, { column: v.column, reason: v.reason, scan_run_id: runId }, v.column, `APP-${randomUUID()}`);
+      await writeEvent(
+        'CORRECTION_REQUESTED',
+        email,
+        { column: v.column, reason: v.reason, scan_run_id: runId },
+        v.column,
+        `APP-${randomUUID()}`
+      );
       res.json({ scanRunId: runId });
-    }),
+    })
   );
 }

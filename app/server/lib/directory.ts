@@ -1,78 +1,68 @@
+import type { Request } from 'express';
 import { getExecutionContext } from '@databricks/appkit';
-
-/** Full SDK client; AppKit's client exposes only a subset of APIs. */
-function sdk() {
-  return getExecutionContext().client.toLegacyWorkspaceClient();
-}
+import { userEmail } from './identity';
+import { settings } from './settings';
 
 /**
- * Resolves scope reviewer values (one user email or one group name) to lower-case user names.
- * Mirrors phi_framework.directory.GroupDirectory so the App's pre-checks and ingestion's
- * authoritative validation agree: an existing workspace group wins; otherwise a value containing
- * "@" is a single user; anything else resolves to no one. Nested groups are expanded.
+ * Who the signed-in user is and which groups they belong to.
+ *
+ * Group membership comes from SCIM /Me called with the user's own token (forwarded by the
+ * Apps proxy with the default iam.current-user:read user scope). It lists direct and inherited
+ * groups, so nested groups count. The App service principal never reads group member lists,
+ * which the workspace restricts to admins.
+ *
+ * A scope reviewer value (steward_group or governance_owner) matches when it is the user's
+ * email or the name of one of their groups -- the same rule ingestion applies.
  */
+export interface Principal {
+  email: string;
+  groups: Set<string>;
+}
+
 const TTL_MS = 5 * 60_000;
+const cache = new Map<string, { at: number; groups: Set<string> }>();
 
-type Entry = { at: number; users: Set<string> };
-const cache = new Map<string, Entry>();
-const userNames = new Map<string, string | null>();
-
-async function userName(id: string): Promise<string | null> {
-  if (!userNames.has(id)) {
-    try {
-      const u = await sdk().usersV2.get({ id });
-      userNames.set(id, (u.userName ?? '').toLowerCase() || null);
-    } catch {
-      userNames.set(id, null); // deleted user or service principal
-    }
-  }
-  return userNames.get(id) ?? null;
+interface ScimMe {
+  userName?: string;
+  groups?: { display?: string }[];
 }
 
-async function groupByName(name: string): Promise<{ id?: string } | undefined> {
-  if (name.includes('"')) return undefined;
-  for await (const g of sdk().groupsV2.list({ filter: `displayName eq "${name}"`, attributes: 'id,displayName' })) {
-    if (g.displayName === name) return g;
-  }
-  return undefined;
+async function groupsFor(token: string): Promise<Set<string>> {
+  const hit = cache.get(token);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.groups;
+  const host = (getExecutionContext().client.config.host ?? '').replace(/\/$/, '');
+  const res = await fetch(`${host}/api/2.0/preview/scim/v2/Me?attributes=userName,groups`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Could not read your group memberships (${res.status})`);
+  const me = (await res.json()) as ScimMe;
+  const groups = new Set((me.groups ?? []).map((g) => g.display ?? '').filter(Boolean));
+  cache.set(token, { at: Date.now(), groups });
+  return groups;
 }
 
-async function expandGroup(rootId: string): Promise<Set<string>> {
-  const client = sdk();
-  const users = new Set<string>();
-  const seen = new Set<string>();
-  const stack = [rootId];
-  while (stack.length) {
-    const id = stack.pop() as string;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const g = await client.groupsV2.get({ id });
-    for (const m of g.members ?? []) {
-      const ref = m.$ref ?? '';
-      if (ref.startsWith('Groups/') && m.value) stack.push(m.value);
-      else if (ref.startsWith('Users/') && m.value) {
-        const n = await userName(m.value);
-        if (n) users.add(n);
-      }
-    }
+export async function principal(req: Request): Promise<Principal | undefined> {
+  const email = userEmail(req);
+  if (!email) return undefined;
+  const token = req.header('x-forwarded-access-token') ?? '';
+  if (token) return { email, groups: await groupsFor(token) };
+  // Local development without a forwarded token: membership comes from PHI_DEV_USER_GROUPS.
+  const s = settings();
+  if (s.NODE_ENV === 'development') {
+    return {
+      email,
+      groups: new Set(
+        s.PHI_DEV_USER_GROUPS.split(',')
+          .map((g) => g.trim())
+          .filter(Boolean)
+      ),
+    };
   }
-  return users;
+  throw new Error('The App did not receive your access token; check that user authorization is enabled');
 }
 
-export async function principals(value: string | null | undefined): Promise<Set<string>> {
+export function includes(p: Principal, value: string | null | undefined): boolean {
   const v = (value ?? '').trim();
-  if (!v) return new Set();
-  const hit = cache.get(v);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.users;
-  const group = await groupByName(v);
-  let users: Set<string>;
-  if (group?.id) users = await expandGroup(group.id);
-  else if (v.includes('@')) users = new Set([v.toLowerCase()]);
-  else users = new Set();
-  cache.set(v, { at: Date.now(), users });
-  return users;
-}
-
-export async function includes(user: string, value: string | null | undefined): Promise<boolean> {
-  return (await principals(value)).has(user.toLowerCase());
+  if (!v) return false;
+  return p.groups.has(v) || v.toLowerCase() === p.email;
 }

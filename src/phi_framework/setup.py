@@ -11,7 +11,7 @@ import re
 
 from phi_framework.config import Settings
 from phi_framework.ddl import TableDef, create_table_sql, table_defs
-from phi_framework.keys import make_key_function_ddl
+from phi_framework.keys import MAKE_KEY_BODY, make_key_function_ddl
 from phi_framework.runtime import Runtime, log
 from phi_framework.sqlutil import lit, qi
 
@@ -31,7 +31,7 @@ class Setup:
             f"CREATE SCHEMA IF NOT EXISTS {s.schema_fqn} COMMENT "
             f"{lit('PHI classification governance records (system of record for the classification audit process).')}"
         )
-        self.rt.sql(make_key_function_ddl(s.schema_fqn))
+        self._ensure_key_function()
 
         defs = table_defs(s.env, s.governed_catalog_prefix)
         for t in defs:
@@ -42,6 +42,23 @@ class Setup:
         log.info("Setup complete for %s", s.schema_fqn)
 
     # ------------------------------------------------------------------
+    def _ensure_key_function(self) -> None:
+        """Create make_key, replacing it only when its body changed.
+
+        CREATE OR REPLACE drops the function's grants, including the review App's EXECUTE
+        granted at App deployment, so an unchanged function is left alone.
+        """
+        s = self.s
+        rows = self.rt.rows(
+            f"SELECT routine_definition FROM {qi(s.governance_catalog)}.information_schema.routines "
+            f"WHERE routine_schema = {lit(s.governance_schema)} AND routine_name = 'make_key'"
+        )
+        if rows and _norm(rows[0]["routine_definition"] or "") == _norm(MAKE_KEY_BODY):
+            return
+        if rows:
+            log.warning("make_key changed; replacing it. Redeploy the review App to restore its EXECUTE grant.")
+        self.rt.sql(make_key_function_ddl(s.schema_fqn))
+
     def _ensure_table(self, t: TableDef) -> None:
         fq = f"{self.s.schema_fqn}.{qi(t.name)}"
         self.rt.sql(create_table_sql(self.s.schema_fqn, t))

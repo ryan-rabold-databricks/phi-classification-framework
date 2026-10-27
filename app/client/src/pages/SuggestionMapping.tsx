@@ -99,8 +99,8 @@ export function SuggestionMapping({ canEdit }: { canEdit: boolean }) {
       )}
       <div className="flex items-center gap-2">
         <p className="text-sm text-muted-foreground">
-          Maps each Data Classification class to the value suggested to reviewers. A suggestion is never applied without a
-          reviewer&apos;s decision. Deactivate a mapping instead of deleting it.
+          Maps each Data Classification class to the value suggested to reviewers. A suggestion is never applied without
+          a reviewer&apos;s decision. Deactivate a mapping instead of deleting it.
         </p>
         {canEdit && (
           <Button
@@ -189,7 +189,11 @@ export function SuggestionMapping({ canEdit }: { canEdit: boolean }) {
               {isNew && (
                 <div className="space-y-1">
                   <Label htmlFor="map-class">Data Classification class</Label>
-                  <Input id="map-class" value={form.class_tag} onChange={(e) => setForm({ ...form, class_tag: e.target.value })} />
+                  <Input
+                    id="map-class"
+                    value={form.class_tag}
+                    onChange={(e) => setForm({ ...form, class_tag: e.target.value })}
+                  />
                 </div>
               )}
               <div className="space-y-1">
@@ -208,12 +212,20 @@ export function SuggestionMapping({ canEdit }: { canEdit: boolean }) {
                 </Select>
               </div>
               <div className="flex items-center gap-2">
-                <Checkbox id="map-active" checked={form.is_active} onCheckedChange={(v) => setForm({ ...form, is_active: v === true })} />
+                <Checkbox
+                  id="map-active"
+                  checked={form.is_active}
+                  onCheckedChange={(v) => setForm({ ...form, is_active: v === true })}
+                />
                 <Label htmlFor="map-active">Active</Label>
               </div>
               <div className="space-y-1">
                 <Label htmlFor="map-notes">Notes</Label>
-                <Textarea id="map-notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+                <Textarea
+                  id="map-notes"
+                  value={form.notes}
+                  onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                />
               </div>
               {formError && <p className="text-sm text-destructive">{formError.join('; ')}</p>}
             </div>

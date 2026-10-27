@@ -13,7 +13,7 @@ resources:
             - ${var.governance_catalog}.${var.governance_schema}.classification_review_submission
           condition: ANY_UPDATED
           min_time_between_triggers_seconds: 60
-          wait_after_last_change_seconds: 30
+          wait_after_last_change_seconds: 60
       parameters:
         - name: process_name
           default: ${var.env}_phi_decision_ingestion

@@ -11,10 +11,14 @@ const EnvSchema = z.object({
   PHI_GOVERNED_CATALOG_PREFIX: ident,
   PHI_TAG_KEY: z.string().min(1),
   PHI_SCAN_JOB_ID: z.string().regex(/^\d+$/),
-  PHI_ALLOWED_VALUES_OVERRIDE: z.string().default(''),
+  PHI_ALLOWED_VALUES_OVERRIDE: z
+    .string()
+    .default('')
+    .transform((v) => v.replace(/^values:/, '')),
   DATABRICKS_WAREHOUSE_ID: z.string().min(1),
   // Local development only: identity used when the Apps proxy headers are absent.
   PHI_DEV_USER_EMAIL: z.string().default(''),
+  PHI_DEV_USER_GROUPS: z.string().default(''),
   NODE_ENV: z.string().default('production'),
 });
 

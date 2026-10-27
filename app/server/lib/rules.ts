@@ -2,7 +2,12 @@
  * Decision rules checked in the App before a submission is written, so reviewers get immediate
  * feedback. Ingestion (phi_framework.validation) re-checks every rule and is authoritative.
  */
-export const DECISIONS = ['APPROVE_SUGGESTION', 'CORRECT_CLASSIFICATION', 'CONFIRM_NOT_PHI', 'REQUEST_PRIVACY_REVIEW'] as const;
+export const DECISIONS = [
+  'APPROVE_SUGGESTION',
+  'CORRECT_CLASSIFICATION',
+  'CONFIRM_NOT_PHI',
+  'REQUEST_PRIVACY_REVIEW',
+] as const;
 export type Decision = (typeof DECISIONS)[number];
 
 export const REVIEWABLE_STATUSES = ['PENDING_STEWARD_REVIEW', 'VALIDATION_FAILED'];
@@ -32,7 +37,8 @@ export function checkDecision(item: ItemForCheck, d: DecisionInput, privacy: boo
   const corrected = clean(d.corrected_tag_value);
   const comment = clean(d.steward_comment);
   if (privacy && item.status !== PRIVACY_STATUS) errors.push('Item is not awaiting a Privacy outcome');
-  if (!privacy && !REVIEWABLE_STATUSES.includes(item.status)) errors.push(`Item is ${item.status} and does not accept a decision`);
+  if (!privacy && !REVIEWABLE_STATUSES.includes(item.status))
+    errors.push(`Item is ${item.status} and does not accept a decision`);
   switch (d.decision) {
     case 'APPROVE_SUGGESTION':
       if (!item.suggested_tag_value || !allowed.has(item.suggested_tag_value)) {
@@ -43,7 +49,8 @@ export function checkDecision(item: ItemForCheck, d: DecisionInput, privacy: boo
       if (corrected) errors.push('Leave the corrected value empty when approving the suggestion');
       break;
     case 'CORRECT_CLASSIFICATION':
-      if (!corrected || !allowed.has(corrected)) errors.push('Choose an allowed value for the corrected classification');
+      if (!corrected || !allowed.has(corrected))
+        errors.push('Choose an allowed value for the corrected classification');
       break;
     case 'CONFIRM_NOT_PHI':
       if (!comment) errors.push('Explain why the column is not PHI');

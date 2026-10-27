@@ -7,6 +7,8 @@ resources:
       name: ${var.review_app_name}
       description: PHI classification review for ${var.env}
       source_code_path: ../app
+      # The App reads the signed-in user's own group memberships (SCIM /Me) with the user token the
+      # Apps proxy forwards. iam.current-user:read is a default user scope and cannot be requested explicitly.
       config:
         command: ["npm", "run", "start"]
         env:
@@ -26,8 +28,9 @@ resources:
             value: ${var.governed_catalog_prefix}
           - name: PHI_TAG_KEY
             value: ${var.tag_key}
+          # Prefixed so the value is never empty (the Apps API rejects empty env values).
           - name: PHI_ALLOWED_VALUES_OVERRIDE
-            value: ${var.allowed_values_override}
+            value: values:${var.allowed_values_override}
       resources:
         - name: sql-warehouse
           sql_warehouse:

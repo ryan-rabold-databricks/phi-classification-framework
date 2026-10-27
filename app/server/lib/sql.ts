@@ -21,7 +21,7 @@ function sqlType(v: SqlValue): string {
 export async function runSql(statement: string, params: Record<string, SqlValue> = {}): Promise<Row[]> {
   const { client } = getExecutionContext();
   const parameters = Object.entries(params).map(([name, value]) =>
-    value === null ? { name, type: 'STRING' } : { name, value: String(value), type: sqlType(value) },
+    value === null ? { name, type: 'STRING' } : { name, value: String(value), type: sqlType(value) }
   );
   let res = await client.statementExecution.executeStatement({
     warehouse_id: settings().DATABRICKS_WAREHOUSE_ID,
@@ -42,7 +42,5 @@ export async function runSql(statement: string, params: Record<string, SqlValue>
     throw new Error(res.status?.error?.message ?? `SQL statement ${res.status?.state ?? 'failed'}`);
   }
   const cols = res.manifest?.schema?.columns?.map((c) => c.name ?? '') ?? [];
-  return (res.result?.data_array ?? []).map((values) =>
-    Object.fromEntries(cols.map((c, i) => [c, values[i] ?? null])),
-  );
+  return (res.result?.data_array ?? []).map((values) => Object.fromEntries(cols.map((c, i) => [c, values[i] ?? null])));
 }
