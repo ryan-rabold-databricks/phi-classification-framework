@@ -50,6 +50,8 @@ variables:
     description: Name of the review App in this workspace (<=30 chars, lowercase and hyphens). Emails link to it.
   warehouse_id:
     description: SQL warehouse the review App uses to read queues and write submissions.
+  review_app_users_group:
+    description: Group granted CAN_USE on the review App; include every steward and governance owner.
   smtp_host:
     description: SMTP relay for review-request emails. Empty disables email; reviewers still see queues in the App.
     default: ""

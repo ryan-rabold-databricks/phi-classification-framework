@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy the framework to one target: bootstrap the governance objects, then deploy the bundle.
+# Deploy the framework to one target: bootstrap the governance objects, deploy the bundle (jobs and
+# review App), then start the App. Databricks Apps installs and builds the App from app/package.json.
 #
 #   scripts/deploy.sh <target> <warehouse_id> [profile]
 #
@@ -19,10 +20,13 @@ cd "$(dirname "$0")/.."
 echo "==> Validating bundle (target: $TARGET)"
 databricks bundle validate --strict -t "$TARGET" "${PROFILE_ARGS[@]}"
 
-echo "==> Bootstrapping governance schema, Volume, tables, and constraints"
+echo "==> Bootstrapping governance schema, tables, and constraints"
 uv run --quiet python tools/bootstrap.py -t "$TARGET" --warehouse-id "$WAREHOUSE_ID" "${PROFILE_ARGS[@]}"
 
 echo "==> Deploying bundle"
 databricks bundle deploy -t "$TARGET" "${PROFILE_ARGS[@]}"
+
+echo "==> Starting the review App with the deployed source"
+databricks bundle run phi_review_app -t "$TARGET" "${PROFILE_ARGS[@]}"
 
 echo "Done. The setup job (<env>_phi_framework_setup) can be rerun at any time; it is idempotent."

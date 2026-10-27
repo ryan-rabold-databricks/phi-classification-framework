@@ -164,3 +164,6 @@ resources:
           level: CAN_MANAGE
         - group_name: ${var.governance_group}
           level: CAN_MANAGE_RUN
+        # The review App starts on-demand correction scans.
+        - service_principal_name: ${resources.apps.phi_review_app.service_principal_client_id}
+          level: CAN_MANAGE_RUN

@@ -1,0 +1,101 @@
+# <env> review App: steward review queues, Privacy outcomes, and Data Governance maintenance of the
+# scope registry and suggestion mapping. Writes go only to the tables granted below (MODIFY);
+# everything else is read-only. Ingestion validates every submission.
+resources:
+  apps:
+    phi_review_app:
+      name: ${var.review_app_name}
+      description: PHI classification review for ${var.env}
+      source_code_path: ../app
+      config:
+        command: ["npm", "run", "start"]
+        env:
+          - name: DATABRICKS_WAREHOUSE_ID
+            value_from: sql-warehouse
+          - name: PHI_SCAN_JOB_ID
+            value_from: scan-job
+          - name: PHI_ENV
+            value: ${var.env}
+          - name: PHI_GOVERNANCE_CATALOG
+            value: ${var.governance_catalog}
+          - name: PHI_GOVERNANCE_SCHEMA
+            value: ${var.governance_schema}
+          - name: PHI_GOVERNANCE_GROUP
+            value: ${var.governance_group}
+          - name: PHI_GOVERNED_CATALOG_PREFIX
+            value: ${var.governed_catalog_prefix}
+          - name: PHI_TAG_KEY
+            value: ${var.tag_key}
+          - name: PHI_ALLOWED_VALUES_OVERRIDE
+            value: ${var.allowed_values_override}
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: scan-job
+          job:
+            id: ${resources.jobs.phi_classification_scan.id}
+            permission: CAN_MANAGE_RUN
+        - name: key-function
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.make_key
+            permission: EXECUTE
+        - name: read-batches
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_review_batch
+            permission: SELECT
+        - name: read-items
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_review_item
+            permission: SELECT
+        - name: read-scopes
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_scope_registry
+            permission: SELECT
+        - name: write-scopes
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_scope_registry
+            permission: MODIFY
+        - name: read-mapping
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_suggestion_mapping
+            permission: SELECT
+        - name: write-mapping
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_suggestion_mapping
+            permission: MODIFY
+        - name: read-events
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_review_event
+            permission: SELECT
+        - name: write-events
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_review_event
+            permission: MODIFY
+        - name: read-submissions
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_review_submission
+            permission: SELECT
+        - name: write-submissions
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.governance_catalog}.${var.governance_schema}.classification_review_submission
+            permission: MODIFY
+      permissions:
+        - group_name: ${var.platform_group}
+          level: CAN_MANAGE
+        - group_name: ${var.governance_group}
+          level: CAN_USE
+        - group_name: ${var.review_app_users_group}
+          level: CAN_USE
