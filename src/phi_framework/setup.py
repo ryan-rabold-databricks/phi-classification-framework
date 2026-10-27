@@ -1,4 +1,4 @@
-"""Idempotent setup: schema, Volume, key function, tables, constraints, keys, and comments.
+"""Idempotent setup: schema, key function, tables, constraints, keys, and comments.
 
 Runs before the first job run and on every deployment. Safe to rerun:
 existing objects are reconciled, never dropped (except a CHECK constraint whose
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 
-from phi_framework import constants as c
 from phi_framework.config import Settings
 from phi_framework.ddl import TableDef, create_table_sql, table_defs
 from phi_framework.keys import make_key_function_ddl
@@ -32,12 +31,6 @@ class Setup:
             f"CREATE SCHEMA IF NOT EXISTS {s.schema_fqn} COMMENT "
             f"{lit('PHI classification governance records (system of record for the classification audit process).')}"
         )
-        self.rt.sql(
-            f"CREATE VOLUME IF NOT EXISTS {s.schema_fqn}.{qi(c.V_FILES)} COMMENT "
-            f"{lit('Exported and returned review workbooks. Returned workbooks are never overwritten.')}"
-        )
-        for sub in ("inbound", "outbound"):
-            self.rt.w.files.create_directory(f"{s.volume_path}/{sub}")
         self.rt.sql(make_key_function_ddl(s.schema_fqn))
 
         defs = table_defs(s.env, s.governed_catalog_prefix)

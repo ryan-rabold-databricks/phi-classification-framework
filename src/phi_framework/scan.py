@@ -365,12 +365,14 @@ class Scan:
     # ------------------------------------------------------------------
     def _update_open_items(self) -> None:
         stage = f"{self.s.schema_fqn}.{qi(STAGE_TABLE)}"
-        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value"]
+        # assigned_steward follows the scope registry, so a changed steward_group reroutes open items.
+        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value", "assigned_steward"]
         frozen = ["issue_type", "suggested_tag_value", "suggestion_reason"]
-        # Once an item has gone to a steward (assigned) or is a correction, its issue and suggestion are
-        # frozen: a steward's APPROVE_SUGGESTION must approve the value they were shown.
+        # Issue and suggestion refresh only while an item awaits its first decision and is not a
+        # correction. The App records the suggestion each reviewer saw, and ingestion rejects an
+        # APPROVE_SUGGESTION whose suggestion has since changed.
         mutable = (
-            f"t.status = {lit(c.PENDING_STEWARD_REVIEW)} AND t.assigned_steward IS NULL "
+            f"t.status = {lit(c.PENDING_STEWARD_REVIEW)} AND t.decision IS NULL "
             f"AND t.issue_type <> {lit(c.CORRECTION_REQUESTED)}"
         )
         changed = " OR ".join(
@@ -381,7 +383,8 @@ class Scan:
         )
         self.rt.sql(
             f"""MERGE INTO {self.rt.t(c.T_ITEM)} t
-            USING (SELECT * FROM {stage} WHERE issue_type IS NOT NULL AND open_item_id IS NOT NULL) s
+            USING (SELECT *, steward_group AS assigned_steward FROM {stage}
+                   WHERE issue_type IS NOT NULL AND open_item_id IS NOT NULL) s
             ON t.review_item_id = s.open_item_id
             WHEN MATCHED AND t.status IN ({in_list(c.NON_TERMINAL_STATUSES)}) AND ({changed})
               THEN UPDATE SET {sets}, {self.rt.audit_update_set()}"""
@@ -410,10 +413,11 @@ class Scan:
             ON t.review_item_id = s.review_item_id
             WHEN NOT MATCHED THEN INSERT (review_item_id, review_batch_id, catalog_name, schema_name, table_name,
                 table_type, column_name, full_data_type, column_comment, column_fingerprint, issue_type,
-                current_tag_value, suggested_tag_value, suggestion_reason, status, {', '.join(audit)})
+                current_tag_value, suggested_tag_value, suggestion_reason, assigned_steward, status, {', '.join(audit)})
             VALUES (s.review_item_id, s.new_batch_id, s.catalog_name, s.schema_name, s.table_name, s.table_type,
                 s.column_name, s.full_data_type, s.column_comment, s.column_fingerprint, s.issue_type,
-                s.current_tag_value, s.suggested_tag_value, s.suggestion_reason, {lit(c.PENDING_STEWARD_REVIEW)},
+                s.current_tag_value, s.suggested_tag_value, s.suggestion_reason, s.steward_group,
+                {lit(c.PENDING_STEWARD_REVIEW)},
                 {', '.join(audit.values())})"""
         )
         proc = lit(self.s.process_name)

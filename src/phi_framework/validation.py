@@ -1,31 +1,17 @@
-"""Pure decision-validation rules (no Spark), shared by the Excel pilot and the Phase 2 App."""
+"""Pure decision-validation rules (no Spark), applied by ingestion to every App submission."""
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from phi_framework import constants as c
 
-REVIEWED_AT_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}) ([+-])(\d{2}):(\d{2})$")
-
-
-def parse_reviewed_at(raw: str | None) -> datetime:
-    """Parse 'YYYY-MM-DD HH:MM ±HH:MM' into a naive UTC datetime. Raises ValueError when invalid."""
-    if raw is None:
-        raise ValueError("reviewed_at is required")
-    text = str(raw).strip()
-    m = REVIEWED_AT_PATTERN.match(text)
-    if not m:
-        raise ValueError(f"reviewed_at {text!r} must be 'YYYY-MM-DD HH:MM ±HH:MM', for example 2026-10-14 11:40 -04:00")
-    date_part, hh, mm, sign, oh, om = m.groups()
-    if int(oh) > 14 or int(om) >= 60:
-        raise ValueError(f"reviewed_at {text!r} has an invalid UTC offset")
-    offset = timedelta(hours=int(oh), minutes=int(om)) * (1 if sign == "+" else -1)
-    local = datetime.strptime(f"{date_part} {hh}:{mm}", "%Y-%m-%d %H:%M")
-    return local.replace(tzinfo=timezone(offset)).astimezone(UTC).replace(tzinfo=None)
+# Roles a reviewer can act in; recorded on DECISION_RECEIVED events.
+ACTING_STEWARD = "STEWARD"
+ACTING_GOVERNANCE_OWNER = "GOVERNANCE_OWNER"
+ACTING_DATA_GOVERNANCE = "DATA_GOVERNANCE"
 
 
 @dataclass(frozen=True)
@@ -35,7 +21,8 @@ class ItemContext:
     status: str
     suggested_tag_value: str | None
     batch_created_at: datetime  # naive UTC
-    steward_group: str
+    steward_group: str  # one user email or one group name
+    governance_owner: str  # one user email or one group name
 
 
 @dataclass(frozen=True)
@@ -44,9 +31,10 @@ class Submission:
     corrected_tag_value: str | None
     steward_comment: str | None
     reviewed_by: str | None
-    reviewed_at_raw: str | None
+    reviewed_at: datetime | None  # naive UTC, captured by the App server
     submission_type: str  # REVIEW or PRIVACY
     review_batch_id: str
+    suggested_tag_value_seen: str | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +47,7 @@ class Outcome:
     reviewed_at: datetime | None = None
     comment: str | None = None
     corrected_tag_value: str | None = None
+    acting_as: str | None = None
 
 
 def _clean(v) -> str | None:
@@ -72,10 +61,12 @@ def validate_decision(
     item: ItemContext,
     sub: Submission,
     is_allowed_value: Callable[[str | None], bool],
-    is_member: Callable[[str | None, str], bool],
+    includes: Callable[[str | None, str], bool],
     governance_group: str,
     now_utc: datetime,
 ) -> Outcome:
+    """Validate one submission. ``includes(user, value)`` is true when the user is the user, or a
+    member of the group, named by a scope reviewer value (see GroupDirectory.includes)."""
     errors: list[str] = []
     decision = _clean(sub.decision)
     decision = decision.upper() if decision else None
@@ -86,34 +77,46 @@ def validate_decision(
     privacy_outcome = item.status == c.NEEDS_PRIVACY_REVIEW
 
     if sub.review_batch_id != item.review_batch_id:
-        errors.append(f"Workbook batch {sub.review_batch_id} does not match the item's batch {item.review_batch_id}")
+        errors.append(f"Submission batch {sub.review_batch_id} does not match the item's batch {item.review_batch_id}")
     if decision not in c.DECISIONS:
         errors.append(f"decision must be one of {', '.join(c.DECISIONS)}")
 
-    # Reviewer authorization
+    # Reviewer authorization: stewards review; the governance owner may review in their place.
+    acting_as = None
     if not reviewer:
         errors.append("reviewed_by is required")
     elif privacy_outcome:
-        if not is_member(reviewer, governance_group):
-            errors.append(f"reviewed_by {reviewer} must be a member of {governance_group} to record a Privacy outcome")
-    elif not is_member(reviewer, item.steward_group):
-        errors.append(f"reviewed_by {reviewer} is not a member of steward group {item.steward_group}")
+        if includes(reviewer, governance_group):
+            acting_as = ACTING_DATA_GOVERNANCE
+        elif includes(reviewer, item.governance_owner):
+            acting_as = ACTING_GOVERNANCE_OWNER
+        else:
+            errors.append(
+                f"{reviewer} must be in {governance_group} or be the scope's governance owner to record a Privacy outcome"
+            )
+    elif includes(reviewer, item.steward_group):
+        acting_as = ACTING_STEWARD
+    elif includes(reviewer, item.governance_owner):
+        acting_as = ACTING_GOVERNANCE_OWNER
+    else:
+        errors.append(f"{reviewer} is not a reviewer for this scope (steward group or governance owner)")
 
-    # Decision time
-    reviewed_at = None
-    try:
-        reviewed_at = parse_reviewed_at(sub.reviewed_at_raw)
+    # Decision time (captured by the App server)
+    reviewed_at = sub.reviewed_at
+    if reviewed_at is None:
+        errors.append("reviewed_at is required")
+    else:
         if reviewed_at > now_utc + timedelta(minutes=5):
             errors.append("reviewed_at is in the future")
         if reviewed_at < item.batch_created_at.replace(second=0, microsecond=0):
             errors.append("reviewed_at is earlier than the batch was created")
-    except ValueError as exc:
-        errors.append(str(exc))
 
     approved = None
     if decision == c.APPROVE_SUGGESTION:
         if not is_allowed_value(item.suggested_tag_value):
             errors.append("APPROVE_SUGGESTION requires a suggested value that is an allowed governed-tag value")
+        elif _clean(sub.suggested_tag_value_seen) != _clean(item.suggested_tag_value):
+            errors.append("The suggested value changed after the item was opened for review; review it again")
         approved = item.suggested_tag_value
         if corrected:
             errors.append("corrected_tag_value must be empty for APPROVE_SUGGESTION")
@@ -141,6 +144,7 @@ def validate_decision(
         reviewed_at=reviewed_at,
         comment=comment,
         corrected_tag_value=corrected,
+        acting_as=acting_as,
     )
 
 

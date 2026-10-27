@@ -49,6 +49,16 @@ def test_unknown_group_is_empty():
     assert GroupDirectory(client()).members("missing") == frozenset()
 
 
+def test_reviewer_values_resolve_to_group_members_or_one_user():
+    d = GroupDirectory(client())
+    assert d.principals("stewards") == {"u1@example.com", "u2@example.com"}
+    assert d.principals(" Solo@Example.com ") == {"solo@example.com"}
+    assert d.principals("not_a_group") == frozenset()
+    assert d.principals(None) == frozenset()
+    assert d.includes("u2@example.com", "stewards") and d.includes("solo@example.com", "Solo@Example.com")
+    assert not d.includes("u1@example.com", "missing")
+
+
 def test_tag_policy_override_and_api():
     assert TagPolicy(None, "k", override="a, b,,c").allowed == {"a", "b", "c"}
     w = NS(tag_policies=NS(get_tag_policy=lambda key: NS(values=[NS(name="x"), NS(name="y")])))

@@ -1,23 +1,20 @@
-"""<env>_phi_decision_ingestion: turn returned workbooks into validated governance actions.
+"""<env>_phi_decision_ingestion: turn review App submissions into validated governance actions.
 
-Flow per returned workbook (processed oldest first):
+Triggered when the review App adds rows to classification_review_submission.
+Each App submit action writes one submission set per batch. Ingestion processes
+every set that has no SUBMISSION_PROCESSED event yet, oldest first:
 
-1. Skip the file when a WORKBOOK_INGESTED event already carries its SHA-256.
-2. Parse it into normalized submission records (classification_review_submission).
-3. Process the submission set:
-   * ASSIGNMENT rows set assigned_steward (STEWARD_ASSIGNED);
-   * REVIEW / PRIVACY rows are validated, then produce plans, attestations,
-     Privacy routing, VALIDATION_FAILED, or CHANGE_IGNORED_ALREADY_RESOLVED.
-4. Write WORKBOOK_INGESTED last, so a crashed run reprocesses the file and the
+1. Validate each submission (reviewer authorization, decision rules, allowed values).
+2. Produce plans, attestations, Privacy routing, VALIDATION_FAILED, or
+   CHANGE_IGNORED_ALREADY_RESOLVED.
+3. Write SUBMISSION_PROCESSED last, so a crashed run reprocesses the set and the
    deterministic keys make every write a no-op the second time.
 
-``process_submission_set`` does not know where submissions came from; the
-Phase 2 App writes the same records and reuses it.
+Submissions are never changed; outcomes are recorded on the review item and in events.
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 
 from phi_framework import constants as c
@@ -29,14 +26,7 @@ from phi_framework.runtime import Runtime, log, utcnow
 from phi_framework.sqlutil import in_list, lit, qi
 from phi_framework.tag_ddl import render_tag_ddl
 from phi_framework.validation import ItemContext, Submission, submitted_differs, validate_decision
-from phi_framework.workbook import parse_workbook
 
-SUBMISSION_SCHEMA = (
-    "submission_id string, submission_set_id string, source_type string, source_path string, "
-    "submission_type string, review_batch_id string, review_item_id string, source_row_number int, "
-    "assigned_steward string, decision string, corrected_tag_value string, steward_comment string, "
-    "reviewed_by string, reviewed_at_raw string, submitted_at timestamp"
-)
 ITEM_UPDATE_SCHEMA = (
     "review_item_id string, status string, decision string, corrected_tag_value string, steward_comment string, "
     "reviewed_by string, reviewed_at timestamp"
@@ -53,11 +43,6 @@ ATTESTATION_SCHEMA = (
 )
 
 
-# Batch id recorded on WORKBOOK_REJECTED events when a file cannot be parsed far enough to
-# identify its batch (foreign keys are informational, so the sentinel is accepted).
-UNPARSED_BATCH_ID = "UNPARSED"
-
-
 @dataclass
 class SetResult:
     counts: dict
@@ -69,118 +54,53 @@ class Ingestion:
         self.s: Settings = rt.s
         self.policy = TagPolicy(rt.w, self.s.tag_key, self.s.allowed_values_override)
         self.groups = GroupDirectory(rt.w)
-        self.failures: list[str] = []
 
     # ------------------------------------------------------------------
     def run(self) -> None:
-        files = self._list_inbound()
-        seen = {
-            r["discriminator"]
-            for r in self.rt.rows(
-                f"SELECT DISTINCT discriminator FROM {self.rt.t(c.T_EVENT)} "
-                f"WHERE event_type IN ({lit(c.EV_WORKBOOK_INGESTED)}, {lit(c.EV_WORKBOOK_REJECTED)}) "
-                f"AND discriminator IS NOT NULL"
-            )
-        }
-        processed = 0
-        for path in files:
-            data = self.rt.w.files.download(path).contents.read()
-            sha = hashlib.sha256(data).hexdigest()
-            if sha in seen:
-                continue
-            try:
-                parsed = parse_workbook(data)
-            except Exception as exc:  # report once, then skip this content on later runs
-                msg = f"{path}: {exc}"
-                log.error("Rejected workbook %s", msg)
-                self.failures.append(msg)
-                self.rt.event(
-                    c.EV_WORKBOOK_REJECTED,
-                    UNPARSED_BATCH_ID,
-                    details={"path": path, "error": str(exc)[:2000]},
-                    discriminator=sha,
-                )
-                self.rt.flush_events()
-                seen.add(sha)
-                continue
-            self._write_submissions(sha, path, parsed)
-            result = self.process_submission_set(sha, parsed.workbook_type, parsed.review_batch_id)
+        sets = self.rt.rows(
+            f"""SELECT submission_set_id, first(submission_type) AS submission_type,
+                   first(review_batch_id) AS review_batch_id, count(*) AS n,
+                   count(DISTINCT review_batch_id) AS batches, count(DISTINCT submission_type) AS types
+            FROM {self.rt.t(c.T_SUBMISSION)} s
+            WHERE NOT EXISTS (
+              SELECT 1 FROM {self.rt.t(c.T_EVENT)} e
+              WHERE e.event_type = {lit(c.EV_SUBMISSION_PROCESSED)} AND e.discriminator = s.submission_set_id)
+            GROUP BY submission_set_id
+            ORDER BY min(audit_created_at), submission_set_id"""
+        )
+        for st in sets:
+            set_id = st["submission_set_id"]
+            if st["batches"] != 1 or st["types"] != 1:
+                # The App writes one set per batch and submission type; anything else is rejected whole.
+                log.error("Submission set %s mixes batches or types; rejected", set_id)
+                for sub in self._set_rows(set_id):
+                    self._reject(set_id, sub, ["Submission set mixes batches or submission types"], "DECISION")
+                result = SetResult({"rejected_set": st["n"]})
+            else:
+                result = self.process_submission_set(set_id)
             self.rt.event(
-                c.EV_WORKBOOK_INGESTED,
-                parsed.review_batch_id,
-                details={
-                    "path": path,
-                    "workbook_type": parsed.workbook_type,
-                    "audience": parsed.meta.get("audience"),
-                    "export_content_hash": parsed.meta.get("content_hash"),
-                    "rows": len(parsed.rows),
-                    **result.counts,
-                },
-                discriminator=sha,
+                c.EV_SUBMISSION_PROCESSED,
+                st["review_batch_id"],
+                details={"submission_type": st["submission_type"], "rows": st["n"], **result.counts},
+                discriminator=set_id,
             )
             self.rt.flush_events()
-            seen.add(sha)
-            processed += 1
         close_completed_batches(self.rt)
         self.rt.flush_events()
-        log.info("Ingested %d new workbook(s)", processed)
-        if self.failures:
-            raise RuntimeError("Some workbooks were rejected:\n" + "\n".join(self.failures))
+        log.info("Processed %d submission set(s)", len(sets))
 
-    def _list_inbound(self) -> list[str]:
-        found: list[tuple] = []
-        stack = [self.s.inbound_path]
-        while stack:
-            d = stack.pop()
-            for e in self.rt.w.files.list_directory_contents(d):
-                if e.is_directory:
-                    stack.append(e.path)
-                elif e.path.lower().endswith(".xlsx") and not e.name.startswith("~$"):
-                    found.append((e.last_modified or 0, e.path))
-        return [p for _, p in sorted(found)]
-
-    def _write_submissions(self, sha: str, path: str, parsed) -> None:
-        now = utcnow()
-        rows = []
-        for r in parsed.rows:
-            v = r.values
-            rows.append(
-                {
-                    "submission_id": make_key("SUB", [sha, r.review_item_id]),
-                    "submission_set_id": sha,
-                    "source_type": c.SOURCE_WORKBOOK,
-                    "source_path": path,
-                    "submission_type": parsed.workbook_type,
-                    "review_batch_id": parsed.review_batch_id,
-                    "review_item_id": r.review_item_id,
-                    "source_row_number": r.row_number,
-                    "assigned_steward": (v.get("assigned_steward") or None) and v["assigned_steward"].lower(),
-                    "decision": v.get("decision"),
-                    "corrected_tag_value": v.get("corrected_tag_value"),
-                    "steward_comment": v.get("steward_comment"),
-                    "reviewed_by": v.get("reviewed_by"),
-                    "reviewed_at_raw": v.get("reviewed_at"),
-                    "submitted_at": now,
-                }
-            )
-        if not rows:
-            return
-        view = self.rt.temp_view(rows, SUBMISSION_SCHEMA, "phi_submissions")
-        cols = [f.split()[0] for f in SUBMISSION_SCHEMA.split(", ")]
-        self.rt.sql(
-            f"""MERGE INTO {self.rt.t(c.T_SUBMISSION)} t USING {view} s ON t.submission_id = s.submission_id
-            WHEN NOT MATCHED THEN INSERT {self.rt.insert_values_clause('s', cols, created_only=True)}"""
+    def _set_rows(self, set_id: str) -> list[dict]:
+        return self.rt.rows(
+            f"SELECT * FROM {self.rt.t(c.T_SUBMISSION)} WHERE submission_set_id = {lit(set_id)} ORDER BY review_item_id"
         )
 
     # ------------------------------------------------------------------
-    def process_submission_set(self, set_id: str, submission_type: str, batch_id: str) -> SetResult:
-        subs = self.rt.rows(
-            f"SELECT * FROM {self.rt.t(c.T_SUBMISSION)} WHERE submission_set_id = {lit(set_id)} ORDER BY source_row_number"
-        )
+    def process_submission_set(self, set_id: str) -> SetResult:
+        subs = self._set_rows(set_id)
         items = {
             r["review_item_id"]: r
             for r in self.rt.rows(
-                f"""SELECT i.*, b.created_at AS batch_created_at, s.steward_group, s.risk_tier
+                f"""SELECT i.*, b.created_at AS batch_created_at, s.steward_group, s.governance_owner, s.risk_tier
                 FROM {self.rt.t(c.T_ITEM)} i
                 JOIN {self.rt.t(c.T_BATCH)} b ON b.review_batch_id = i.review_batch_id
                 JOIN {self.rt.t(c.T_SCOPE)} s ON s.scope_id = b.scope_id
@@ -188,8 +108,6 @@ class Ingestion:
                       WHERE submission_set_id = {lit(set_id)}) x ON x.review_item_id = i.review_item_id"""
             )
         }
-        if submission_type == c.WB_ASSIGNMENT:
-            return self._process_assignments(set_id, subs, items)
         return self._process_decisions(set_id, subs, items)
 
     def _reject(self, set_id: str, sub: dict, errors: list[str], kind: str) -> None:
@@ -203,52 +121,6 @@ class Ingestion:
             discriminator=set_id,
         )
 
-    # ---------- assignments ----------
-    def _process_assignments(self, set_id: str, subs: list[dict], items: dict) -> SetResult:
-        updates: list[tuple[str, str]] = []
-        counts = {"assigned": 0, "unchanged": 0, "rejected": 0, "blank": 0}
-        for sub in subs:
-            steward = sub.get("assigned_steward")
-            if not steward:
-                counts["blank"] += 1
-                continue
-            it = items.get(sub["review_item_id"])
-            errors = []
-            if it is None or it["review_batch_id"] != sub["review_batch_id"]:
-                errors.append("Unknown review item for this batch")
-            elif it["status"] not in (c.PENDING_STEWARD_REVIEW, c.VALIDATION_FAILED):
-                errors.append(f"Item status {it['status']} does not accept assignment")
-            elif not self.groups.is_member(steward, it["steward_group"]):
-                errors.append(f"{steward} is not a member of steward group {it['steward_group']}")
-            if errors:
-                counts["rejected"] += 1
-                self._reject(set_id, sub, errors, "ASSIGNMENT")
-                continue
-            if (it["assigned_steward"] or "").lower() == steward:
-                counts["unchanged"] += 1
-                continue
-            updates.append((it["review_item_id"], steward))
-            counts["assigned"] += 1
-            self.rt.event(
-                c.EV_STEWARD_ASSIGNED,
-                it["review_batch_id"],
-                it["review_item_id"],
-                details={"previous_steward": it["assigned_steward"], "assigned_steward": steward},
-                discriminator=set_id,
-            )
-        if updates:
-            view = self.rt.temp_view(
-                [{"review_item_id": i, "assigned_steward": s} for i, s in updates],
-                "review_item_id string, assigned_steward string",
-                "phi_assign",
-            )
-            self.rt.sql(
-                f"""MERGE INTO {self.rt.t(c.T_ITEM)} t USING {view} s ON t.review_item_id = s.review_item_id
-                WHEN MATCHED AND t.status IN ({in_list([c.PENDING_STEWARD_REVIEW, c.VALIDATION_FAILED])})
-                THEN UPDATE SET assigned_steward = s.assigned_steward, {self.rt.audit_update_set()}"""
-            )
-        return SetResult(counts)
-
     # ---------- decisions ----------
     def _process_decisions(self, set_id: str, subs: list[dict], items: dict) -> SetResult:
         now = utcnow()
@@ -261,9 +133,10 @@ class Ingestion:
                 corrected_tag_value=sub.get("corrected_tag_value"),
                 steward_comment=sub.get("steward_comment"),
                 reviewed_by=sub.get("reviewed_by"),
-                reviewed_at_raw=sub.get("reviewed_at_raw"),
+                reviewed_at=sub.get("reviewed_at"),
                 submission_type=sub["submission_type"],
                 review_batch_id=sub["review_batch_id"],
+                suggested_tag_value_seen=sub.get("suggested_tag_value_seen"),
             )
             if not any((s.decision, s.corrected_tag_value, s.steward_comment)):
                 counts["blank"] += 1
@@ -295,12 +168,12 @@ class Ingestion:
             if privacy_item and (s.decision or "").strip().upper() == c.REQUEST_PRIVACY_REVIEW and not submitted_differs(it, s):
                 counts["unchanged"] += 1  # resubmitted copy of the original request
                 continue
-            if privacy_item != (s.submission_type == c.WB_PRIVACY):
+            if privacy_item != (s.submission_type == c.SUB_PRIVACY):
                 counts["failed"] += 1
                 reason = (
-                    "Item is in Privacy review; only a PRIVACY workbook can record its outcome"
+                    "Item is in Privacy review; record its outcome from the Privacy review queue"
                     if privacy_item
-                    else "Item is not in Privacy review; record the decision in a REVIEW workbook"
+                    else "Item is not in Privacy review; record the decision from the review queue"
                 )
                 self._reject(set_id, sub, [reason], "DECISION")  # status unchanged
                 continue
@@ -312,15 +185,16 @@ class Ingestion:
                 suggested_tag_value=it["suggested_tag_value"],
                 batch_created_at=it["batch_created_at"],
                 steward_group=it["steward_group"],
+                governance_owner=it["governance_owner"],
             )
             out = validate_decision(
-                ctx, s, self.policy.is_allowed, self.groups.is_member, self.s.governance_group, now
+                ctx, s, self.policy.is_allowed, self.groups.includes, self.s.governance_group, now
             )
             if not out.ok:
                 counts["failed"] += 1
                 if privacy_item:
                     # A rejected Privacy outcome must not take the item out of Privacy review;
-                    # record the rejection only (the PRIVACY workbook shows the reason).
+                    # record the rejection only (the App shows the reason on the Privacy queue).
                     self._reject(set_id, sub, list(out.errors), "DECISION")
                     continue
                 item_updates.append(
@@ -342,7 +216,8 @@ class Ingestion:
                 it["review_batch_id"],
                 it["review_item_id"],
                 business_actor=out.reviewed_by,
-                details={"decision": out.decision, "corrected_tag_value": out.corrected_tag_value},
+                details={"decision": out.decision, "corrected_tag_value": out.corrected_tag_value,
+                         "acting_as": out.acting_as},
                 discriminator=set_id,
             )
             update = {
@@ -521,7 +396,8 @@ class Ingestion:
 
 
 def _submitted(sub: dict) -> dict:
-    return {k: sub.get(k) for k in ("decision", "corrected_tag_value", "steward_comment", "reviewed_by", "reviewed_at_raw", "source_row_number")}
+    return {k: sub.get(k) for k in ("submission_id", "decision", "corrected_tag_value", "steward_comment",
+                                     "suggested_tag_value_seen", "reviewed_by", "reviewed_at")}
 
 
 def _recorded(it: dict) -> dict:

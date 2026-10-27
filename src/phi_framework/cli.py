@@ -25,8 +25,8 @@ def scan() -> None:
     _run(main)
 
 
-def export() -> None:
-    from phi_framework.export import main
+def notify() -> None:
+    from phi_framework.notify import main
 
     _run(main)
 

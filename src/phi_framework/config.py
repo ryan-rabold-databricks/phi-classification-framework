@@ -35,7 +35,6 @@ class Settings:
     business_timezone: str = "UTC"
     detect_orphaned_tags: bool = False
     retry_failed: bool = False
-    workbook_protection_password: str = "phi-review"
     # dev only: comma-separated allowed values used instead of the governed-tag policy (sandboxes
     # where a tag policy cannot be created). Rejected in qa and prod.
     allowed_values_override: str = ""
@@ -46,6 +45,13 @@ class Settings:
     correction_column: str = ""
     correction_reason: str = ""
     correction_requested_by: str = ""
+    # Review-request email (notify task). An empty smtp_host disables sending; the App still shows queues.
+    review_app_name: str = ""
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_sender: str = ""
+    smtp_secret_scope: str = ""  # holds optional smtp_username / smtp_password keys
+    smtp_use_tls: bool = True
     extra: dict = field(default_factory=dict)
 
     # ---- derived names ----
@@ -55,18 +61,6 @@ class Settings:
 
     def table(self, name: str) -> str:
         return f"{self.schema_fqn}.`{name}`"
-
-    @property
-    def volume_path(self) -> str:
-        return f"/Volumes/{self.governance_catalog}/{self.governance_schema}/{c.V_FILES}"
-
-    @property
-    def inbound_path(self) -> str:
-        return f"{self.volume_path}/inbound"
-
-    @property
-    def outbound_path(self) -> str:
-        return f"{self.volume_path}/outbound"
 
     def validate(self, expected_role: str | None = None) -> None:
         if self.env not in c.ENVIRONMENTS:
@@ -85,6 +79,8 @@ class Settings:
             re.compile(self.excluded_table_regex)
         if self.allowed_values_override and self.env != "dev":
             raise ValueError("allowed_values_override is only permitted in dev; qa and prod must use the governed-tag policy")
+        if self.smtp_host and not self.smtp_sender:
+            raise ValueError("smtp_sender is required when smtp_host is set")
         if not self.run_id or not self.run_id.isdigit():
             raise ValueError(f"run_id must be the Lakeflow job run id, got {self.run_id!r}")
 
@@ -104,12 +100,17 @@ def parse_args(argv: list[str] | None = None) -> Settings:
     p.add_argument("--business-timezone", default="UTC")
     p.add_argument("--detect-orphaned-tags", default="false")
     p.add_argument("--retry-failed", default="false")
-    p.add_argument("--workbook-protection-password", default="phi-review")
     p.add_argument("--allowed-values-override", default="")
     p.add_argument("--excluded-table-regex", default=DEFAULT_EXCLUDED_TABLE_REGEX)
     p.add_argument("--correction-column", default="")
     p.add_argument("--correction-reason", default="")
     p.add_argument("--correction-requested-by", default="")
+    p.add_argument("--review-app-name", default="")
+    p.add_argument("--smtp-host", default="")
+    p.add_argument("--smtp-port", default="587")
+    p.add_argument("--smtp-sender", default="")
+    p.add_argument("--smtp-secret-scope", default="")
+    p.add_argument("--smtp-use-tls", default="true")
     a = p.parse_args(argv)
     return Settings(
         env=a.env.strip(),
@@ -125,10 +126,15 @@ def parse_args(argv: list[str] | None = None) -> Settings:
         business_timezone=a.business_timezone.strip(),
         detect_orphaned_tags=_bool(a.detect_orphaned_tags),
         retry_failed=_bool(a.retry_failed),
-        workbook_protection_password=a.workbook_protection_password,
         allowed_values_override=a.allowed_values_override.strip(),
         excluded_table_regex=a.excluded_table_regex.strip(),
         correction_column=a.correction_column.strip(),
         correction_reason=a.correction_reason.strip(),
         correction_requested_by=a.correction_requested_by.strip().lower(),
+        review_app_name=a.review_app_name.strip(),
+        smtp_host=a.smtp_host.strip(),
+        smtp_port=int(a.smtp_port or 587),
+        smtp_sender=a.smtp_sender.strip(),
+        smtp_secret_scope=a.smtp_secret_scope.strip(),
+        smtp_use_tls=_bool(a.smtp_use_tls),
     )

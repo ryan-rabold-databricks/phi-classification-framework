@@ -1,4 +1,4 @@
-"""Lookups against the governed-tag policy and workspace groups."""
+"""Lookups against the governed-tag policy, workspace groups, and scope reviewer values."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ class GroupDirectory:
         self.w = workspace_client
         self._members: dict[str, frozenset[str]] = {}
         self._users: dict[str, str | None] = {}
+        self._group_exists: dict[str, bool] = {}
 
     def _user_name(self, user_id: str) -> str | None:
         if user_id not in self._users:
@@ -83,3 +84,26 @@ class GroupDirectory:
 
     def is_member(self, user_name: str | None, group_name: str) -> bool:
         return bool(user_name) and user_name.strip().lower() in self.members(group_name)
+
+    def principals(self, value: str | None) -> frozenset[str]:
+        """Users a scope reviewer value stands for.
+
+        ``steward_group`` and ``governance_owner`` each hold one user email or one
+        group name. A workspace group with that exact name wins; otherwise a value
+        containing ``@`` is a single user. Anything else resolves to no one.
+        """
+        v = (value or "").strip()
+        if not v:
+            return frozenset()
+        if v not in self._group_exists:
+            self._group_exists[v] = self._group_by_name(v) is not None
+        if self._group_exists[v]:
+            return self.members(v)
+        if "@" in v:
+            return frozenset({v.lower()})
+        log.warning("Reviewer value %s is neither a workspace group nor a user email", v)
+        return frozenset()
+
+    def includes(self, user_name: str | None, value: str | None) -> bool:
+        """True when ``user_name`` is the user, or a member of the group, named by ``value``."""
+        return bool(user_name) and user_name.strip().lower() in self.principals(value)

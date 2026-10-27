@@ -1,4 +1,4 @@
-# Idempotent DDL: schema, Volume, make_key, tables, CHECK constraints, keys, comments.
+# Idempotent DDL: schema, make_key, tables, CHECK constraints, keys, comments.
 # Run after every deployment (scripts/deploy.sh does this) and before the first framework run.
 resources:
   jobs:
@@ -32,8 +32,6 @@ resources:
           default: ${var.business_timezone}
         - name: detect_orphaned_tags
           default: ${var.detect_orphaned_tags}
-        - name: workbook_protection_password
-          default: ${var.workbook_protection_password}
         - name: allowed_values_override
           default: ${var.allowed_values_override}
         - name: excluded_table_regex
@@ -72,8 +70,6 @@ resources:
                 - "{{job.parameters.business_timezone}}"
                 - --detect-orphaned-tags
                 - "{{job.parameters.detect_orphaned_tags}}"
-                - --workbook-protection-password
-                - "{{job.parameters.workbook_protection_password}}"
                 - --allowed-values-override
                 - "{{job.parameters.allowed_values_override}}"
                 - --excluded-table-regex
