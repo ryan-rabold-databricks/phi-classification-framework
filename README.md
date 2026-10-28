@@ -422,7 +422,7 @@ Notes:
 ## Testing
 
 ```bash
-# Python unit tests (no workspace needed): 58 tests
+# Python unit tests (no workspace needed): 60 tests
 uv run --with pytest pytest
 
 # Lint
@@ -431,7 +431,7 @@ uv run ruff check src tests tools
 # App unit tests, lint, and type checks
 cd app && npx vitest run && npm run lint && npm run typecheck && cd ..
 
-# End-to-end against a deployed dev sandbox with synthetic data
+# End-to-end against a deployed dev sandbox with synthetic data (74 checks)
 uv run python tests/integration/e2e_sandbox.py \
     -p <profile> --warehouse-id <id> \
     --steward-group <dev test steward group> \
