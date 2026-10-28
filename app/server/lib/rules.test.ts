@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { checkDecision } from './rules';
+import { checkDecision, selectGrant } from './rules';
 
 const allowed = new Set(['name', 'mrn']);
 const pending = { status: 'PENDING_STEWARD_REVIEW', suggested_tag_value: 'name' };
@@ -49,5 +49,38 @@ describe('checkDecision', () => {
     expect(checkDecision(pending, { decision: 'CONFIRM_NOT_PHI', steward_comment: 'x' }, true, allowed)).toHaveLength(
       1
     );
+  });
+});
+
+describe('selectGrant', () => {
+  const scope = (roles: ('STEWARD' | 'GOVERNANCE_OWNER')[]) => ({
+    steward_group: 'clinical_stewards',
+    governance_owner: 'owner@example.com',
+    roles,
+  });
+
+  test('review decisions prefer the steward role, then the governance owner', () => {
+    expect(selectGrant(false, true, 'gov', scope(['STEWARD', 'GOVERNANCE_OWNER']))).toEqual({
+      actingAs: 'STEWARD',
+      via: 'clinical_stewards',
+    });
+    expect(selectGrant(false, false, 'gov', scope(['GOVERNANCE_OWNER']))).toEqual({
+      actingAs: 'GOVERNANCE_OWNER',
+      via: 'owner@example.com',
+    });
+  });
+
+  test('Data Governance membership alone does not authorize review decisions', () => {
+    expect(selectGrant(false, true, 'gov', scope([]))).toBeUndefined();
+    expect(selectGrant(false, false, 'gov', undefined)).toBeUndefined();
+  });
+
+  test('Privacy outcomes prefer Data Governance, then the governance owner; stewards cannot record them', () => {
+    expect(selectGrant(true, true, 'gov', scope(['STEWARD']))).toEqual({ actingAs: 'DATA_GOVERNANCE', via: 'gov' });
+    expect(selectGrant(true, false, 'gov', scope(['GOVERNANCE_OWNER']))).toEqual({
+      actingAs: 'GOVERNANCE_OWNER',
+      via: 'owner@example.com',
+    });
+    expect(selectGrant(true, false, 'gov', scope(['STEWARD']))).toBeUndefined();
   });
 });

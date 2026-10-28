@@ -7,8 +7,10 @@ and no REVIEW_REQUEST_SENT event yet, it sends one email:
 * Cc: every user the scope's ``governance_owner`` resolves to, except those already in To.
 * Body: counts, scope, due date, and a link to the batch in the review App. No column data.
 
-Each send records REVIEW_REQUEST_SENT; a failure records REVIEW_REQUEST_FAILED and fails the
-task after every batch has been attempted. An empty ``smtp_host`` disables sending.
+Each send records REVIEW_REQUEST_SENT. A send failure records REVIEW_REQUEST_FAILED (kind SEND), is
+retried by the next scan, and fails the task after every batch has been attempted. A batch whose
+reviewer values resolve to no users records REVIEW_REQUEST_FAILED (kind RECIPIENTS) once and is not
+retried; values that cannot be resolved are listed on the event. An empty ``smtp_host`` disables sending.
 """
 
 from __future__ import annotations
@@ -23,6 +25,10 @@ from phi_framework.config import Settings
 from phi_framework.directory import GroupDirectory
 from phi_framework.runtime import Runtime, log
 from phi_framework.sqlutil import in_list, lit
+
+# REVIEW_REQUEST_FAILED kinds: RECIPIENTS is recorded once per batch; SEND is retried by the next scan.
+FAIL_RECIPIENTS = "RECIPIENTS"
+FAIL_SEND = "SEND"
 
 
 @dataclass(frozen=True)
@@ -73,10 +79,13 @@ class Notifier:
             log.info("No batches awaiting a review request")
             return
         base_url = self._app_url()
-        failures = 0
+        send_failures = 0
         for b in pending:
-            to = sorted(self.groups.principals(b["steward_group"]))
-            cc = sorted(self.groups.principals(b["governance_owner"]) - set(to))
+            # Each batch is handled on its own: an unresolvable reviewer value (for example a group whose
+            # member list this identity cannot read) never stops the other batches.
+            to_set, unresolved = self._resolve(b["steward_group"])
+            cc_set, unresolved_cc = self._resolve(b["governance_owner"])
+            unresolved += unresolved_cc
             req = ReviewRequest(
                 review_batch_id=b["review_batch_id"],
                 scope_id=b["scope_id"],
@@ -84,30 +93,41 @@ class Notifier:
                 schema_name=b["schema_name"],
                 due_at=b["due_at"],
                 item_count=int(b["item_count"]),
-                to=tuple(to),
-                cc=tuple(cc),
+                to=tuple(sorted(to_set)),
+                cc=tuple(sorted(cc_set - to_set)),
                 link=f"{base_url}/?batch={b['review_batch_id']}" if base_url else "(review app URL not configured)",
             )
-            details = {"to": list(req.to), "cc": list(req.cc), "item_count": req.item_count}
+            details = {"to": list(req.to), "cc": list(req.cc), "item_count": req.item_count, "unresolved": unresolved}
             if not req.to and not req.cc:
-                failures += 1
+                # A configuration problem, not a transient one: record it once and do not retry the batch
+                # or fail the scan every week. Reviewers still see the batch in the App.
+                log.error("Review request for %s has no resolvable recipients: %s", req.review_batch_id, unresolved)
                 self.rt.event(c.EV_REVIEW_REQUEST_FAILED, req.review_batch_id,
-                              details={**details, "error": "steward_group and governance_owner resolve to no users"})
-                continue
-            try:
-                self._send(req)
-                self.rt.event(c.EV_REVIEW_REQUEST_SENT, req.review_batch_id, details=details)
-            except Exception as exc:  # one failed send must not stop the others
-                failures += 1
-                log.error("Review request for %s failed: %s", req.review_batch_id, exc)
-                self.rt.event(c.EV_REVIEW_REQUEST_FAILED, req.review_batch_id,
-                              details={**details, "error": f"{type(exc).__name__}: {exc}"[:2000]})
+                              details={**details, "kind": FAIL_RECIPIENTS,
+                                       "error": "steward_group and governance_owner resolve to no users"})
+            else:
+                try:
+                    self._send(req)
+                    self.rt.event(c.EV_REVIEW_REQUEST_SENT, req.review_batch_id, details=details)
+                except Exception as exc:  # one failed send must not stop the others; retried next scan
+                    send_failures += 1
+                    log.error("Review request for %s failed: %s", req.review_batch_id, exc)
+                    self.rt.event(c.EV_REVIEW_REQUEST_FAILED, req.review_batch_id,
+                                  details={**details, "kind": FAIL_SEND, "error": f"{type(exc).__name__}: {exc}"[:2000]})
             # Record each outcome immediately so a crash never causes a batch to be emailed twice.
             self.rt.flush_events()
-        self.rt.flush_events()
-        log.info("Review requests: %d batch(es), %d failed", len(pending), failures)
-        if failures:
-            raise RuntimeError(f"{failures} review request(s) failed; see REVIEW_REQUEST_FAILED events")
+        log.info("Review requests: %d batch(es), %d send failure(s)", len(pending), send_failures)
+        if send_failures:
+            raise RuntimeError(f"{send_failures} review request(s) could not be sent; see REVIEW_REQUEST_FAILED events")
+
+    def _resolve(self, value: str | None) -> tuple[set[str], list[str]]:
+        """Users a reviewer value stands for, and the value itself when it could not be resolved."""
+        try:
+            users = set(self.groups.principals(value))
+        except Exception as exc:  # for example a 403 reading a group's members
+            log.warning("Could not resolve reviewer value %s: %s", value, exc)
+            return set(), [f"{value}: {type(exc).__name__}"]
+        return users, ([] if users or not value else [f"{value}: no users"])
 
     # ------------------------------------------------------------------
     def _pending_batches(self) -> list[dict]:
@@ -121,7 +141,10 @@ class Notifier:
               AND i.status IN ({in_list(c.REVIEWABLE_STATUSES)})
               AND NOT EXISTS (
                 SELECT 1 FROM {self.rt.t(c.T_EVENT)} e
-                WHERE e.review_batch_id = b.review_batch_id AND e.event_type = {lit(c.EV_REVIEW_REQUEST_SENT)})
+                WHERE e.review_batch_id = b.review_batch_id
+                  AND (e.event_type = {lit(c.EV_REVIEW_REQUEST_SENT)}
+                       OR (e.event_type = {lit(c.EV_REVIEW_REQUEST_FAILED)}
+                           AND CAST(e.event_details:kind AS STRING) = {lit(FAIL_RECIPIENTS)})))
             GROUP BY ALL
             ORDER BY b.review_batch_id"""
         )

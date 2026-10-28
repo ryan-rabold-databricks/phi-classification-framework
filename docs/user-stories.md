@@ -164,7 +164,7 @@ Code to start from: `src/phi_framework/notify.py`, the `notify_reviewers` task i
 **Acceptance criteria**
 - [ ] One email per new batch: To every user `steward_group` names (one email, or all members of the group); Cc every user `governance_owner` names who is not already in To.
 - [ ] The email shows counts, scope, due date, and a link to the batch in the App, and never column names, comments, or data.
-- [ ] Each send records `REVIEW_REQUEST_SENT` with the recipients; a failure records `REVIEW_REQUEST_FAILED` and fails the task after every batch is attempted.
+- [ ] Each send records `REVIEW_REQUEST_SENT` with the recipients and any unresolvable reviewer values. A batch with no resolvable recipients records `REVIEW_REQUEST_FAILED` (kind `RECIPIENTS`) once without failing the scan; a send failure records kind `SEND`, fails the task after every batch is attempted, and is retried by the next scan.
 - [ ] Rerunning the scan does not resend for a batch already emailed. The task has no retries.
 - [ ] With `smtp_host` empty, nothing is sent and the scan still succeeds.
 

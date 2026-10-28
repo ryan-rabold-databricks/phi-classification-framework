@@ -554,6 +554,38 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
         status, _ = self.app("PUT", "/api/review/mappings/class.e2e_test", {"phi_tag_value": "not_a_value", "is_active": True})
         check("mapping to a value outside the policy refused", status == 422)
 
+        print("== 12b. A steward-group change reroutes open items; a recorded decision freezes the suggestion")
+        dc = fqn(self.cat, self.support, "dc_results")
+        self.q(f"CREATE OR REPLACE TABLE {fqn(self.cat, fi, 'reroute')} (c1 STRING COMMENT 'one', c2 STRING COMMENT 'two')")
+        for col in ("c1", "c2"):
+            self.q(f"""INSERT INTO {dc} VALUES (current_timestamp(), current_timestamp(), 'x', 'y', {lit(self.cat)}, {lit(fi)},
+                'reroute', {lit(col)}, 'string', 'class.name', array(), 'HIGH', 0.9)""")
+        self.run_job("phi_classification_scan", self.scan_params)
+        c1, c2 = self.item(fi, "reroute", "c1", True), self.item(fi, "reroute", "c2", True)
+        check("new items routed to the scope's current steward group",
+              c1["assigned_steward"] == FINANCE_STEWARD and c1["suggested_tag_value"] == self.mapping["class.name"])
+        new_steward = "finance.steward2@example.com"
+        status, body = self.app("PUT", "/api/review/scopes/SCOPE-FINANCE-DEV", {
+            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_group": new_steward,
+            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
+        check("steward group changed in the App", status == 200, str(body)[:300])
+        # Record a (rejected) decision on c1 only, then change the Data Classification result for both columns.
+        self.inject(c.SUB_REVIEW, c1, c.CORRECT_CLASSIFICATION, by=self.me, acting_as="GOVERNANCE_OWNER", via=self.me,
+                    corrected="not_a_value")
+        self.run_job("phi_decision_ingestion")
+        check("c1 has a recorded decision", self.item(fi, "reroute", "c1", True)["status"] == c.VALIDATION_FAILED)
+        for col in ("c1", "c2"):
+            self.q(f"""INSERT INTO {dc} VALUES (current_timestamp(), current_timestamp(), 'x', 'y', {lit(self.cat)}, {lit(fi)},
+                'reroute', {lit(col)}, 'string', 'class.email_address', array(), 'HIGH', 0.9)""")
+        self.run_job("phi_classification_scan", self.scan_params)
+        c1, c2 = self.item(fi, "reroute", "c1", True), self.item(fi, "reroute", "c2", True)
+        check("open items rerouted to the new steward group",
+              c1["assigned_steward"] == new_steward and c2["assigned_steward"] == new_steward, f"{c1['assigned_steward']}")
+        check("suggestion frozen once a decision is recorded", c1["suggested_tag_value"] == self.mapping["class.name"],
+              str(c1["suggested_tag_value"]))
+        check("suggestion refreshes while no decision is recorded",
+              c2["suggested_tag_value"] == self.mapping["class.email_address"], str(c2["suggested_tag_value"]))
+
         print("== 13. Audit columns and writer constraints")
         bad = self.sql.scalar(
             f"SELECT count(*) FROM {self.t(c.T_ITEM)} WHERE audit_created_process NOT LIKE 'dev_phi_%' OR audit_updated_run_id IS NULL")

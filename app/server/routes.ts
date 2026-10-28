@@ -3,7 +3,15 @@ import type { Application, Request, Response } from 'express';
 import { getExecutionContext } from '@databricks/appkit';
 import { z } from 'zod';
 import { includes, principal, type Principal } from './lib/directory';
-import { checkDecision, DECISIONS, PRIVACY_STATUS, REVIEWABLE_STATUSES, type ActingAs } from './lib/rules';
+import {
+  checkDecision,
+  DECISIONS,
+  PRIVACY_STATUS,
+  REVIEWABLE_STATUSES,
+  type ActingAs,
+  selectGrant,
+  type Grant,
+} from './lib/rules';
 import { settings, table, T } from './lib/settings';
 import { runSql, type Row, type SqlValue } from './lib/sql';
 
@@ -271,7 +279,7 @@ export function registerRoutes(app: Application): void {
       const problems: Record<string, string[]> = {};
       // Role and the scope value that authorized it; ingestion trusts this check and only confirms the
       // value is still the scope's current steward group, governance owner, or Data Governance group.
-      const auth = new Map<string, { actingAs: ActingAs; via: string }>();
+      const auth = new Map<string, Grant>();
       for (const d of body.decisions) {
         const it = items.get(d.review_item_id);
         if (!it) {
@@ -279,14 +287,7 @@ export function registerRoutes(app: Application): void {
           continue;
         }
         const scope = me.scopes.find((s) => s.scope_id === it.scope_id);
-        let grant: { actingAs: ActingAs; via: string } | undefined;
-        if (privacy) {
-          if (me.isGovernance) grant = { actingAs: 'DATA_GOVERNANCE', via: settings().PHI_GOVERNANCE_GROUP };
-          else if (scope?.roles.includes('GOVERNANCE_OWNER'))
-            grant = { actingAs: 'GOVERNANCE_OWNER', via: scope.governance_owner };
-        } else if (scope?.roles.includes('STEWARD')) grant = { actingAs: 'STEWARD', via: scope.steward_group };
-        else if (scope?.roles.includes('GOVERNANCE_OWNER'))
-          grant = { actingAs: 'GOVERNANCE_OWNER', via: scope.governance_owner };
+        const grant = selectGrant(privacy, me.isGovernance, settings().PHI_GOVERNANCE_GROUP, scope);
         if (grant) auth.set(d.review_item_id, grant);
         const errors = grant ? [] : ['You are not a reviewer for this scope'];
         errors.push(

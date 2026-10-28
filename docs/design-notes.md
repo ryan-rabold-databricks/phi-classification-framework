@@ -128,6 +128,14 @@ design, and why.
     Data Platform, and the App can run the scan job. The trust boundary is MODIFY on the
     submission table, which only the App's service principal holds.
 
+30. **Review-request failures are isolated per batch.** Reviewer values are resolved
+    per batch inside the error handling, so one unreadable group (403) or empty value
+    never stops other batches; unresolved values are listed on the event and the email
+    goes to the rest. A batch with no resolvable recipients records
+    `REVIEW_REQUEST_FAILED` with `kind = RECIPIENTS` once and is excluded from later scans
+    (a configuration problem should not fail every weekly scan); only `kind = SEND`
+    failures fail the task and are retried.
+
 ## Open items for the customer
 
 - **Group membership reads for review-request emails.** Confirmed in testing: the App

@@ -319,9 +319,13 @@ hold. In dev, run ingestion and application manually after submitting in the App
 
 **Monday: scan and notify.** The scan opens items, then the `notify_reviewers`
 task emails each new batch's reviewers with a link to the batch in the App. A
-send records `REVIEW_REQUEST_SENT`; a failure records `REVIEW_REQUEST_FAILED`
-and fails the task (so `failure_notification_emails` fire) after every batch is
-attempted. The email has counts, scope, due date, and the link; never column data.
+send records `REVIEW_REQUEST_SENT`. Each batch is handled on its own: a reviewer
+value that cannot be resolved (for example a group whose members the job cannot
+read) is listed on the event and the email still goes to everyone else. A batch
+with no resolvable recipients records `REVIEW_REQUEST_FAILED` (kind
+`RECIPIENTS`) once and is not retried. A send failure records
+`REVIEW_REQUEST_FAILED` (kind `SEND`), is retried by the next scan, and fails the
+task (so `failure_notification_emails` fire) after every batch is attempted. The email has counts, scope, due date, and the link; never column data.
 
 **Reviewer: decide in the App.** For each column choose
 `APPROVE_SUGGESTION`, `CORRECT_CLASSIFICATION` (pick an allowed value),
@@ -428,7 +432,7 @@ Notes:
 ## Testing
 
 ```bash
-# Python unit tests (no workspace needed): 60 tests
+# Python unit tests (no workspace needed): 64 tests
 uv run --with pytest pytest
 
 # Lint
@@ -437,7 +441,7 @@ uv run ruff check src tests tools
 # App unit tests, lint, and type checks
 cd app && npx vitest run && npm run lint && npm run typecheck && cd ..
 
-# End-to-end against a deployed dev sandbox with synthetic data (75 checks)
+# End-to-end against a deployed dev sandbox with synthetic data (81 checks)
 uv run python tests/integration/e2e_sandbox.py \
     -p <profile> --warehouse-id <id> \
     --steward-group <dev test steward group> \
