@@ -180,16 +180,17 @@ class E2E:
                 for k, d in decisions.items()]
         return self.app("POST", "/api/review/submissions", {"kind": kind, "decisions": rows})
 
-    def inject(self, kind: str, item: dict, decision: str, *, by: str, corrected: str | None = None,
-               comment: str | None = None) -> None:
+    def inject(self, kind: str, item: dict, decision: str, *, by: str, acting_as: str, via: str,
+               corrected: str | None = None, comment: str | None = None) -> None:
         """Write a submission directly, bypassing the App's checks, under the App's process name."""
         set_id = f"E2E-{uuid.uuid4()}:{item['review_batch_id']}"
         self.q(f"""INSERT INTO {self.t(c.T_SUBMISSION)} (submission_id, submission_set_id, submission_type, review_batch_id,
-            review_item_id, decision, corrected_tag_value, steward_comment, suggested_tag_value_seen, reviewed_by, reviewed_at,
-            audit_created_at, audit_created_by, audit_created_process, audit_created_run_id)
+            review_item_id, decision, corrected_tag_value, steward_comment, suggested_tag_value_seen, reviewed_by, acting_as,
+            authorized_via, reviewed_at, audit_created_at, audit_created_by, audit_created_process, audit_created_run_id)
             VALUES ({lit(make_key('SUB', [set_id, item['review_item_id']]))},
             {lit(set_id)}, {lit(kind)}, {lit(item['review_batch_id'])}, {lit(item['review_item_id'])}, {lit(decision)},
-            {lit(corrected)}, {lit(comment)}, {lit(item['suggested_tag_value'])}, {lit(by.lower())}, current_timestamp(),
+            {lit(corrected)}, {lit(comment)}, {lit(item['suggested_tag_value'])}, {lit(by.lower())}, {lit(acting_as)},
+            {lit(via)}, current_timestamp(),
             current_timestamp(), current_user(), {lit(c.app_process_name('dev'))}, 'E2E')""")
 
     def errors_for(self, item_id: str) -> str:
@@ -376,9 +377,15 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
         sub = self.q(f"SELECT * FROM {self.t(c.T_SUBMISSION)} LIMIT 1")[0]
         check("submission carries the authenticated reviewer and App process",
               sub["reviewed_by"] == self.me and sub["audit_created_process"] == c.app_process_name("dev"), str(sub)[:300])
-        # Bypass the App: ingestion must still reject an invalid value and an unauthorized reviewer.
-        self.inject(c.SUB_REVIEW, self.item(cl, "lab_result", "patient_mrn"), c.CORRECT_CLASSIFICATION, by=self.me, corrected="not_a_value")
-        self.inject(c.SUB_REVIEW, self.item(fi, "billing", "patient_email"), c.APPROVE_SUGGESTION, by="not.a.reviewer@example.com")
+        auth = {(r["acting_as"], r["authorized_via"]) for r in self.q(f"SELECT DISTINCT acting_as, authorized_via FROM {self.t(c.T_SUBMISSION)}")}
+        check("App records the role and the scope value that authorized it",
+              auth == {("STEWARD", self.stewards), ("GOVERNANCE_OWNER", self.me)}, str(auth))
+        # Bypass the App: ingestion must still reject an invalid value and an authorization that does not
+        # match the scope's current reviewers.
+        self.inject(c.SUB_REVIEW, self.item(cl, "lab_result", "patient_mrn"), c.CORRECT_CLASSIFICATION, by=self.me,
+                    acting_as="STEWARD", via=self.stewards, corrected="not_a_value")
+        self.inject(c.SUB_REVIEW, self.item(fi, "billing", "patient_email"), c.APPROVE_SUGGESTION, by="not.a.reviewer@example.com",
+                    acting_as="STEWARD", via="phifw_not_the_finance_reviewers")
         self.run_job("phi_decision_ingestion")
         check("approve -> PLANNED", self.item(cl, "patient_encounter", "patient_name")["status"] == c.PLANNED)
         check("correct -> PLANNED", self.item(cl, "patient_encounter", "encounter_date")["status"] == c.PLANNED)
@@ -430,8 +437,10 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
             "decision": c.CONFIRM_NOT_PHI, "steward_comment": "steward tries to close it"}},
             {(cl, "patient_encounter", "notes"): notes})
         check("App refuses a review decision on a Privacy item", status == 422)
-        self.inject(c.SUB_REVIEW, notes, c.CONFIRM_NOT_PHI, by=self.me, comment="steward tries to close it")
-        self.inject(c.SUB_PRIVACY, notes, c.CONFIRM_NOT_PHI, by="not.gov@example.com", comment="not from governance")
+        self.inject(c.SUB_REVIEW, notes, c.CONFIRM_NOT_PHI, by=self.me, acting_as="STEWARD", via=self.stewards,
+                    comment="steward tries to close it")
+        self.inject(c.SUB_PRIVACY, notes, c.CONFIRM_NOT_PHI, by="not.gov@example.com", acting_as="DATA_GOVERNANCE",
+                    via="phifw_not_the_governance_group", comment="not from governance")
         self.run_job("phi_decision_ingestion")
         errs = self.errors_for(notes["review_item_id"])
         check("ingestion: review decision cannot resolve a Privacy item", "Privacy review queue" in errs, errs[:300])
@@ -443,7 +452,8 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
             "decision": c.CONFIRM_NOT_PHI, "steward_comment": "Privacy: notes are system-generated"}}, pq)
         check("App accepts the Privacy outcome", status == 200, str(body)[:300])
         # A change to an accepted decision is ignored and reported.
-        self.inject(c.SUB_REVIEW, self.item(cl, "patient_encounter", "patient_name"), c.CORRECT_CLASSIFICATION, by=self.me, corrected="mrn")
+        self.inject(c.SUB_REVIEW, self.item(cl, "patient_encounter", "patient_name"), c.CORRECT_CLASSIFICATION, by=self.me,
+                    acting_as="STEWARD", via=self.stewards, corrected="mrn")
         q = self.queue()
         status, body = self.submit("REVIEW", {
             (cl, "lab_result", "patient_mrn"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn"},

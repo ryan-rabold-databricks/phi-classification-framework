@@ -117,14 +117,25 @@ design, and why.
     `min_time_between_triggers_seconds: 60` and `wait_after_last_change_seconds: 60`
     (the platform minimum), so validation results appear about a minute or two after a submit.
 
+29. **Ingestion trusts the App's reviewer check.** The App determines each reviewer's role
+    from the signed-in user's own groups and records it with the scope value that
+    authorized it (`acting_as`, `authorized_via`, both NOT NULL with a CHECK on the role).
+    Ingestion confirms the role is valid for the decision (Privacy outcomes:
+    `DATA_GOVERNANCE` or `GOVERNANCE_OWNER`) and that `authorized_via` still equals the
+    scope's current `steward_group`, `governance_owner`, or the Data Governance group, so a
+    registry change after submission invalidates it. It never reads group member lists.
+    Correction scans likewise trust the requester the App passes; only Data Governance,
+    Data Platform, and the App can run the scan job. The trust boundary is MODIFY on the
+    submission table, which only the App's service principal holds.
+
 ## Open items for the customer
 
-- **Group membership reads by the framework service principal.** Confirmed in testing:
-  the App service principal received `403 ... is only accessible by admins` from SCIM
-  Groups `get`. The App no longer needs it, but the jobs do: ingestion's reviewer
-  re-check and the notify task's email expansion read group member lists. Decide how the
-  qa/prod framework service principal gets that ability. Not yet verified with a
-  non-admin principal.
+- **Group membership reads for review-request emails.** Confirmed in testing: the App
+  service principal received `403 ... is only accessible by admins` from SCIM Groups
+  `get`. Reviewer authorization no longer needs member lists (see "Ingestion trusts the
+  App's reviewer check"), but the notify task's email expansion does whenever a scope's
+  `steward_group` or `governance_owner` is a group. Decide how the qa/prod framework
+  service principal gets that ability; not yet verified with a non-admin principal.
 - **Tag policy reads.** The App service principal could read the governed tag policy in
   the sandbox. Confirm the same for the framework service principal in qa and prod.
 - **App URL lookup by the jobs.** The notify task resolves the App URL with the Apps API

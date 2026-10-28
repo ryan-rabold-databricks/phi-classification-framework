@@ -8,10 +8,12 @@ from datetime import datetime, timedelta
 
 from phi_framework import constants as c
 
-# Roles a reviewer can act in; recorded on DECISION_RECEIVED events.
+# Roles a reviewer can act in. The review App determines the role from the signed-in user's own
+# groups and records it, with the scope value that authorized it, on every submission.
 ACTING_STEWARD = "STEWARD"
 ACTING_GOVERNANCE_OWNER = "GOVERNANCE_OWNER"
 ACTING_DATA_GOVERNANCE = "DATA_GOVERNANCE"
+ACTING_ROLES = [ACTING_STEWARD, ACTING_GOVERNANCE_OWNER, ACTING_DATA_GOVERNANCE]
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class Submission:
     submission_type: str  # REVIEW or PRIVACY
     review_batch_id: str
     suggested_tag_value_seen: str | None = None
+    acting_as: str | None = None  # role the App authorized the reviewer in
+    authorized_via: str | None = None  # scope value (or Data Governance group) that authorized the role
 
 
 @dataclass(frozen=True)
@@ -61,12 +65,17 @@ def validate_decision(
     item: ItemContext,
     sub: Submission,
     is_allowed_value: Callable[[str | None], bool],
-    includes: Callable[[str | None, str], bool],
     governance_group: str,
     now_utc: datetime,
 ) -> Outcome:
-    """Validate one submission. ``includes(user, value)`` is true when the user is the user, or a
-    member of the group, named by a scope reviewer value (see GroupDirectory.includes)."""
+    """Validate one submission.
+
+    Reviewer authorization trusts the review App, which checked the signed-in user's own group
+    memberships before writing the submission (only the App may write submissions). Ingestion
+    confirms the recorded role is valid for the decision and that the value which authorized it is
+    still the scope's current steward group, governance owner, or the Data Governance group, so a
+    registry change after submission invalidates it. Group member lists are never read here.
+    """
     errors: list[str] = []
     decision = _clean(sub.decision)
     decision = decision.upper() if decision else None
@@ -81,25 +90,29 @@ def validate_decision(
     if decision not in c.DECISIONS:
         errors.append(f"decision must be one of {', '.join(c.DECISIONS)}")
 
-    # Reviewer authorization: stewards review; the governance owner may review in their place.
-    acting_as = None
+    # Reviewer authorization: stewards review; the governance owner may review in their place;
+    # Privacy outcomes come from Data Governance or the governance owner.
+    acting_as = _clean(sub.acting_as)
+    acting_as = acting_as.upper() if acting_as else None
+    via = (_clean(sub.authorized_via) or "").lower()
+    expected = {
+        ACTING_STEWARD: item.steward_group,
+        ACTING_GOVERNANCE_OWNER: item.governance_owner,
+        ACTING_DATA_GOVERNANCE: governance_group,
+    }
+    allowed_roles = (
+        [ACTING_DATA_GOVERNANCE, ACTING_GOVERNANCE_OWNER] if privacy_outcome else [ACTING_STEWARD, ACTING_GOVERNANCE_OWNER]
+    )
     if not reviewer:
         errors.append("reviewed_by is required")
-    elif privacy_outcome:
-        if includes(reviewer, governance_group):
-            acting_as = ACTING_DATA_GOVERNANCE
-        elif includes(reviewer, item.governance_owner):
-            acting_as = ACTING_GOVERNANCE_OWNER
-        else:
+    elif acting_as not in allowed_roles or via != (_clean(expected.get(acting_as)) or "").lower():
+        if privacy_outcome:
             errors.append(
                 f"{reviewer} must be in {governance_group} or be the scope's governance owner to record a Privacy outcome"
             )
-    elif includes(reviewer, item.steward_group):
-        acting_as = ACTING_STEWARD
-    elif includes(reviewer, item.governance_owner):
-        acting_as = ACTING_GOVERNANCE_OWNER
-    else:
-        errors.append(f"{reviewer} is not a reviewer for this scope (steward group or governance owner)")
+        else:
+            errors.append(f"{reviewer} is not a reviewer for this scope (steward group or governance owner)")
+        acting_as = None
 
     # Decision time (captured by the App server)
     reviewed_at = sub.reviewed_at

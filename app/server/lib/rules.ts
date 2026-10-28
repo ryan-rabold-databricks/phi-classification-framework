@@ -1,6 +1,7 @@
 /**
  * Decision rules checked in the App before a submission is written, so reviewers get immediate
- * feedback. Ingestion (phi_framework.validation) re-checks every rule and is authoritative.
+ * feedback. Ingestion (phi_framework.validation) re-checks every decision rule; for reviewer
+ * authorization it trusts the App's check and confirms the recorded scope value still matches.
  */
 export const DECISIONS = [
   'APPROVE_SUGGESTION',

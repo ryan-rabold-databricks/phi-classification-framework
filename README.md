@@ -165,9 +165,12 @@ How it is built:
   principal.
 - **Writes.** A submit writes one submission set per batch to
   `classification_review_submission`, with the authenticated reviewer, the
-  server time, and the suggestion the reviewer saw. The App pre-checks every
-  decision for immediate feedback; ingestion re-checks all of it and is the
-  authority. Scope and mapping edits are MERGEs plus a
+  server time, the suggestion the reviewer saw, and the role the reviewer acted
+  in with the scope value that authorized it (`acting_as`, `authorized_via`).
+  The App checks every decision for immediate feedback. Ingestion re-checks the
+  decision rules and trusts the App's reviewer check: it confirms the recorded
+  value is still the scope's current steward group, governance owner, or Data
+  Governance group, and never reads group member lists. Scope and mapping edits are MERGEs plus a
   `SCOPE_REGISTRY_UPDATED` / `SUGGESTION_MAPPING_UPDATED` event with the
   before and after values. A correction request starts the scan job with the
   correction parameters and records `CORRECTION_REQUESTED`.
@@ -211,19 +214,16 @@ are honored only when `NODE_ENV=development`.
 | SMTP relay | For review-request emails. Optional: without it, reviewers still see their queues in the App. |
 | Service principal | qa and prod jobs run as a dedicated service principal. |
 
-> **Group membership reads (open decision).** Workspace SCIM restricts reading
-> a group's member list to workspace admins. In testing, the App's service
-> principal received `403 ... is only accessible by admins` from SCIM Groups
-> `get`. The App avoids this by reading the signed-in user's own groups. The
-> jobs do not: ingestion's reviewer re-check and the notify task's email
-> expansion both read group members. In qa and prod, where the jobs run as the
-> framework service principal, that principal needs the ability to read the
-> member lists of every `steward_group`, `governance_owner`, and
-> `governance_group` it resolves. How to grant it (for example admin rights, or
-> another mechanism) is not decided or verified. Until it is, scopes whose
-> reviewer values are single emails work; group values do not resolve under a
-> non-admin service principal. The dev end-to-end test passes because dev jobs
-> run as an admin user.
+> **Group membership reads (email only, open decision).** Workspace SCIM
+> restricts reading a group's member list to workspace admins (the App's
+> service principal received `403 ... is only accessible by admins`). Reviewer
+> authorization never needs it: the App checks the signed-in user's own groups,
+> and ingestion and correction scans trust that check. Only the notify task's
+> email expansion reads member lists: to email every member of a group-valued
+> `steward_group` or `governance_owner`, the framework service principal in qa
+> and prod needs to read those member lists. How to grant it is not decided or
+> verified. Until it is, single-email reviewer values are emailed and group
+> values are not; reviewers can still work their queues in the App.
 
 ---
 
@@ -413,9 +413,15 @@ Notes:
   data. Column comments are free text, so keep them free of PHI.
 - Reviewer identity and decision time come from the authenticated App session and
   the App server, not from user input.
-- Ingestion re-validates every submission: a decision written directly to the
+- Ingestion re-validates every decision rule: a decision written directly to the
   submission table, bypassing the App's checks, is still rejected if it breaks a
-  rule (the end-to-end test proves this).
+  rule or its recorded authorization no longer matches the scope's reviewers (the
+  end-to-end test proves this).
+- Trust boundary: reviewer authorization is the App's check against the user's
+  own groups. Only the App's service principal (and table owners and admins) can
+  write `classification_review_submission`, and the writer CHECK constraint limits
+  the audit process to the jobs and the App. Keep MODIFY on that table limited to
+  the App.
 
 ---
 
@@ -431,7 +437,7 @@ uv run ruff check src tests tools
 # App unit tests, lint, and type checks
 cd app && npx vitest run && npm run lint && npm run typecheck && cd ..
 
-# End-to-end against a deployed dev sandbox with synthetic data (74 checks)
+# End-to-end against a deployed dev sandbox with synthetic data (75 checks)
 uv run python tests/integration/e2e_sandbox.py \
     -p <profile> --warehouse-id <id> \
     --steward-group <dev test steward group> \

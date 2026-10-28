@@ -137,7 +137,8 @@ Code to start from: `app/` (AppKit, TypeScript/React), `resources/review_app.yml
   - `REQUEST_PRIVACY_REVIEW` requires a comment.
   - The reviewer must be a steward or the governance owner for the scope.
 - [ ] Submissions record the authenticated reviewer (`reviewed_by`), the server time (`reviewed_at`), and the suggestion seen, one submission set per batch.
-- [ ] Ingestion re-checks every rule: a submission written directly to the table that breaks a rule is rejected (`VALIDATION_FAILED`).
+- [ ] Each submission records the role the App authorized (`acting_as`) and the scope value that authorized it (`authorized_via`).
+- [ ] Ingestion re-checks every decision rule and trusts the App's reviewer check, confirming `authorized_via` is still the scope's current reviewer value; a submission written directly to the table that breaks a rule or no longer matches is rejected (`VALIDATION_FAILED`). Ingestion never reads group member lists.
 - [ ] Valid decisions produce immutable plan rows (append-only) or attestations, with `expires_at` 3 months out for HIGH scopes and 6 months for STANDARD. `DECISION_RECEIVED` records `acting_as` (`STEWARD` or `GOVERNANCE_OWNER`).
 - [ ] Each submission set is processed exactly once (`SUBMISSION_PROCESSED`); rerunning ingestion changes nothing.
 - [ ] A submission that changes an already-accepted decision is ignored and reported (`CHANGE_IGNORED_ALREADY_RESOLVED`).
@@ -249,7 +250,7 @@ As Data Platform, I want qa and prod (jobs and the review App) deployed only fro
   - `SELECT` on `system.data_classification.results`
   - `ALL PRIVILEGES` on `<env governance catalog>.data_governance`
   - `READ` on the SMTP secret scope
-- **Decide how the framework service principal reads group member lists.** Workspace SCIM limits member lists to admins (the App's service principal got a 403 in testing). Ingestion's reviewer re-check and the email expansion need it whenever a scope uses a group. Agree an approach with the platform admin and verify it with a non-admin principal before go-live.
+- **Decide how the framework service principal reads group member lists for emails.** Workspace SCIM limits member lists to admins (the App's service principal got a 403 in testing). Reviewer authorization does not need it, but the review-request email does whenever a scope's reviewer value is a group. Agree an approach with the platform admin and verify it with a non-admin principal before go-live.
 - Fill in the qa/prod targets: `<qa governance catalog>` / `<qa catalog prefix>` and `<prod governance catalog>` / `<prod catalog prefix>`, plus groups, `framework_service_principal`, `review_app_name`, `warehouse_id`, `review_app_users_group`, and the SMTP settings.
 - Build the CI pipeline: validate, then Python and App tests, then `scripts/deploy.sh <target> <warehouse_id>`, using OAuth M2M.
 

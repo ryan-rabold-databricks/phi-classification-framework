@@ -11,7 +11,8 @@ import { runSql, type Row, type SqlValue } from './lib/sql';
  * Review App API. Every read is filtered on the server by the signed-in user's roles, and every
  * write is a parameterized statement run as the App service principal, which holds only:
  * SELECT on the review tables; MODIFY on submissions, the scope registry, the suggestion mapping,
- * and events; and CAN_MANAGE_RUN on the scan job. Ingestion re-validates every submission.
+ * and events; and CAN_MANAGE_RUN on the scan job. Ingestion re-validates every decision rule and
+ * trusts the reviewer authorization recorded here (acting_as, authorized_via).
  */
 
 const REFERENCE_DATA_BATCH_ID = 'REFERENCE_DATA';
@@ -268,6 +269,9 @@ export function registerRoutes(app: Application): void {
         ).map((r) => [r.review_item_id ?? '', r])
       );
       const problems: Record<string, string[]> = {};
+      // Role and the scope value that authorized it; ingestion trusts this check and only confirms the
+      // value is still the scope's current steward group, governance owner, or Data Governance group.
+      const auth = new Map<string, { actingAs: ActingAs; via: string }>();
       for (const d of body.decisions) {
         const it = items.get(d.review_item_id);
         if (!it) {
@@ -275,10 +279,16 @@ export function registerRoutes(app: Application): void {
           continue;
         }
         const scope = me.scopes.find((s) => s.scope_id === it.scope_id);
-        const authorized = privacy
-          ? me.isGovernance || !!scope?.roles.includes('GOVERNANCE_OWNER')
-          : !!scope && scope.roles.length > 0;
-        const errors = authorized ? [] : ['You are not a reviewer for this scope'];
+        let grant: { actingAs: ActingAs; via: string } | undefined;
+        if (privacy) {
+          if (me.isGovernance) grant = { actingAs: 'DATA_GOVERNANCE', via: settings().PHI_GOVERNANCE_GROUP };
+          else if (scope?.roles.includes('GOVERNANCE_OWNER'))
+            grant = { actingAs: 'GOVERNANCE_OWNER', via: scope.governance_owner };
+        } else if (scope?.roles.includes('STEWARD')) grant = { actingAs: 'STEWARD', via: scope.steward_group };
+        else if (scope?.roles.includes('GOVERNANCE_OWNER'))
+          grant = { actingAs: 'GOVERNANCE_OWNER', via: scope.governance_owner };
+        if (grant) auth.set(d.review_item_id, grant);
+        const errors = grant ? [] : ['You are not a reviewer for this scope'];
         errors.push(
           ...checkDecision(
             { status: it.status ?? '', suggested_tag_value: it.suggested_tag_value },
@@ -315,18 +325,23 @@ export function registerRoutes(app: Application): void {
             [`${p}corr`]: d.corrected_tag_value?.trim() || null,
             [`${p}cmt`]: d.steward_comment?.trim() || null,
             [`${p}seen`]: d.suggested_tag_value_seen ?? null,
+            [`${p}role`]: auth.get(d.review_item_id)?.actingAs ?? null,
+            [`${p}via`]: auth.get(d.review_item_id)?.via ?? null,
           });
-          rows.push(`(:${setKey}, :${p}batch, :${p}item, :${p}dec, :${p}corr, :${p}cmt, :${p}seen)`);
+          rows.push(
+            `(:${setKey}, :${p}batch, :${p}item, :${p}dec, :${p}corr, :${p}cmt, :${p}seen, :${p}role, :${p}via)`
+          );
         }
       }
       // Keys are computed in the SELECT: an inline VALUES table cannot evaluate make_key's lambda.
       await runSql(
         `INSERT INTO ${table(T.submission)} (submission_id, submission_set_id, submission_type, review_batch_id,
            review_item_id, decision, corrected_tag_value, steward_comment, suggested_tag_value_seen, reviewed_by,
-           reviewed_at, audit_created_at, audit_created_by, audit_created_process, audit_created_run_id)
+           acting_as, authorized_via, reviewed_at,
+           audit_created_at, audit_created_by, audit_created_process, audit_created_run_id)
          SELECT ${s.schemaFqn}.make_key('SUB', array(v.set_id, v.item)), v.set_id, :stype, v.batch, v.item,
-           v.dec, v.corr, v.cmt, v.seen, :by, current_timestamp(), ${auditValues()}
-         FROM VALUES ${rows.join(',\n')} AS v(set_id, batch, item, dec, corr, cmt, seen)`,
+           v.dec, v.corr, v.cmt, v.seen, :by, v.role, v.via, current_timestamp(), ${auditValues()}
+         FROM VALUES ${rows.join(',\n')} AS v(set_id, batch, item, dec, corr, cmt, seen, role, via)`,
         params
       );
       res.json({ submitted: body.decisions.length, requestId });

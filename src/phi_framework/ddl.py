@@ -283,6 +283,8 @@ def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
             Col("steward_comment", "STRING", False, "Submitted comment."),
             Col("suggested_tag_value_seen", "STRING", False, "Suggested value shown to the reviewer; APPROVE_SUGGESTION is rejected if it has since changed."),
             Col("reviewed_by", "STRING", True, "Authenticated identity of the reviewer, captured by the App."),
+            Col("acting_as", "STRING", True, "Role the App authorized the reviewer in: STEWARD, GOVERNANCE_OWNER, or DATA_GOVERNANCE."),
+            Col("authorized_via", "STRING", True, "Scope steward_group, governance_owner, or Data Governance group the App matched to the reviewer's own groups or email."),
             Col("reviewed_at", "TIMESTAMP", True, "When the reviewer submitted, captured by the App server in UTC."),
         ]
         + _audit_cols(manual_allowed=False, created_only=True, app_allowed=True),
@@ -291,6 +293,7 @@ def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
         checks={
             "valid_submission_type": f"submission_type IN ({in_list(c.SUBMISSION_TYPES)})",
             "reviewed_by_lower": "reviewed_by = lower(trim(reviewed_by))",
+            "valid_acting_as": f"acting_as IN ({in_list(['STEWARD', 'GOVERNANCE_OWNER', 'DATA_GOVERNANCE'])})",
             **process_checks(False, True, app_allowed=True),
         },
         append_only=True,

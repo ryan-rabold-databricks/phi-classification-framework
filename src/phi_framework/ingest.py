@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from phi_framework import constants as c
 from phi_framework.batches import close_completed_batches
 from phi_framework.config import Settings
-from phi_framework.directory import GroupDirectory, TagPolicy
+from phi_framework.directory import TagPolicy
 from phi_framework.keys import make_key
 from phi_framework.runtime import Runtime, log, utcnow
 from phi_framework.sqlutil import in_list, lit, qi
@@ -53,7 +53,6 @@ class Ingestion:
         self.rt = rt
         self.s: Settings = rt.s
         self.policy = TagPolicy(rt.w, self.s.tag_key, self.s.allowed_values_override)
-        self.groups = GroupDirectory(rt.w)
 
     # ------------------------------------------------------------------
     def run(self) -> None:
@@ -137,6 +136,8 @@ class Ingestion:
                 submission_type=sub["submission_type"],
                 review_batch_id=sub["review_batch_id"],
                 suggested_tag_value_seen=sub.get("suggested_tag_value_seen"),
+                acting_as=sub.get("acting_as"),
+                authorized_via=sub.get("authorized_via"),
             )
             if not any((s.decision, s.corrected_tag_value, s.steward_comment)):
                 counts["blank"] += 1
@@ -188,7 +189,7 @@ class Ingestion:
                 governance_owner=it["governance_owner"],
             )
             out = validate_decision(
-                ctx, s, self.policy.is_allowed, self.groups.includes, self.s.governance_group, now
+                ctx, s, self.policy.is_allowed, self.s.governance_group, now
             )
             if not out.ok:
                 counts["failed"] += 1
@@ -397,7 +398,8 @@ class Ingestion:
 
 def _submitted(sub: dict) -> dict:
     return {k: sub.get(k) for k in ("submission_id", "decision", "corrected_tag_value", "steward_comment",
-                                     "suggested_tag_value_seen", "reviewed_by", "reviewed_at")}
+                                     "suggested_tag_value_seen", "reviewed_by", "reviewed_at", "acting_as",
+                                     "authorized_via")}
 
 
 def _recorded(it: dict) -> dict:

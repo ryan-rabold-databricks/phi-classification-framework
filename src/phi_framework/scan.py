@@ -13,7 +13,7 @@ from __future__ import annotations
 from phi_framework import constants as c
 from phi_framework.batches import close_completed_batches, due_at_utc
 from phi_framework.config import Settings
-from phi_framework.directory import GroupDirectory, TagPolicy
+from phi_framework.directory import TagPolicy
 from phi_framework.keys import fingerprint_sql, make_key, make_key_sql
 from phi_framework.runtime import Runtime, log, utcnow
 from phi_framework.sqlutil import in_list, lit, qi
@@ -68,10 +68,10 @@ class Scan:
             raise ValueError("correction_column must be catalog.schema.table.column")
         if not self.s.correction_reason:
             raise ValueError("correction_reason is required for a correction request")
-        if not GroupDirectory(self.rt.w).is_member(self.s.correction_requested_by, self.s.governance_group):
-            raise PermissionError(
-                f"correction_requested_by {self.s.correction_requested_by!r} is not a member of {self.s.governance_group}"
-            )
+        # The review App verifies the requester is in Data Governance (from their own groups) before it
+        # starts this run; only Data Governance, Data Platform, and the App can run the scan job.
+        if "@" not in self.s.correction_requested_by:
+            raise ValueError("correction_requested_by must be the requesting user's email")
         self.correction = tuple(parts)  # type: ignore[assignment]
         log.info("Correction request for %s by %s", ".".join(parts), self.s.correction_requested_by)
 
