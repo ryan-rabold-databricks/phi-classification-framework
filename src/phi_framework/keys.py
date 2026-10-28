@@ -30,13 +30,16 @@ def make_key_sql(prefix: str, *col_exprs: str) -> str:
     )
 
 
+MAKE_KEY_BODY = """concat(prefix, '-', upper(substr(
+  sha2(array_join(transform(parts, p -> coalesce(p, chr(0))), chr(31)), 256), 1, 16)))"""
+
+
 def make_key_function_ddl(schema_fqn: str) -> str:
     return f"""
 CREATE OR REPLACE FUNCTION {schema_fqn}.make_key(prefix STRING, parts ARRAY<STRING>)
 RETURNS STRING
 COMMENT 'Deterministic framework key: <prefix>-<first 16 hex chars of SHA-256 of parts>.'
-RETURN concat(prefix, '-', upper(substr(
-  sha2(array_join(transform(parts, p -> coalesce(p, chr(0))), chr(31)), 256), 1, 16)))
+RETURN {MAKE_KEY_BODY}
 """
 
 

@@ -1,9 +1,10 @@
 """Run the framework setup DDL through a SQL warehouse, before the bundle is deployed.
 
 Why: Lakeflow Jobs validates trigger targets when a job is created, so the
-ingestion job (file-arrival trigger on the Volume) and the application job
-(table-update trigger on classification_application_plan) cannot be deployed
-until the Volume and table exist. This tool executes exactly the same
+ingestion job (table-update trigger on classification_review_submission) and the
+application job (table-update trigger on classification_application_plan) cannot
+be deployed until those tables exist. The review App's Unity Catalog resources
+(table and function grants) likewise require the objects to exist. This tool executes exactly the same
 ``phi_framework.setup`` code the setup job runs, so deployments are
 order-independent and idempotent.
 

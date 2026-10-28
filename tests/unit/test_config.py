@@ -30,6 +30,7 @@ def test_parse_args_normalizes():
         ({"env": "stage"}, None),
         ({"governed_catalog_prefix": ""}, None),
         ({"excluded_table_regex": "("}, None),
+        ({"smtp_host": "smtp.example.com"}, None),  # sender required
     ],
 )
 def test_validate_rejects(overrides, role):

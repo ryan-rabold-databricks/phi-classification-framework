@@ -1,5 +1,5 @@
-# <env>_phi_decision_ingestion: runs when returned workbooks land in the Volume's inbound/ folder,
-# then exports follow-up workbooks (steward review after assignment, Privacy, rejected decisions).
+# <env>_phi_decision_ingestion: runs when the review App adds rows to classification_review_submission,
+# validates each submission set, and records plans, attestations, Privacy routing, or rejections.
 resources:
   jobs:
     phi_decision_ingestion:
@@ -8,10 +8,12 @@ resources:
       email_notifications:
         on_failure: ${var.failure_notification_emails}
       trigger:
-        file_arrival:
-          url: /Volumes/${var.governance_catalog}/${var.governance_schema}/classification_review_files/inbound/
+        table_update:
+          table_names:
+            - ${var.governance_catalog}.${var.governance_schema}.classification_review_submission
+          condition: ANY_UPDATED
           min_time_between_triggers_seconds: 60
-          wait_after_last_change_seconds: 120
+          wait_after_last_change_seconds: 60
       parameters:
         - name: process_name
           default: ${var.env}_phi_decision_ingestion
@@ -37,8 +39,6 @@ resources:
           default: ${var.business_timezone}
         - name: detect_orphaned_tags
           default: ${var.detect_orphaned_tags}
-        - name: workbook_protection_password
-          default: ${var.workbook_protection_password}
         - name: allowed_values_override
           default: ${var.allowed_values_override}
         - name: excluded_table_regex
@@ -77,50 +77,6 @@ resources:
                 - "{{job.parameters.business_timezone}}"
                 - --detect-orphaned-tags
                 - "{{job.parameters.detect_orphaned_tags}}"
-                - --workbook-protection-password
-                - "{{job.parameters.workbook_protection_password}}"
-                - --allowed-values-override
-                - "{{job.parameters.allowed_values_override}}"
-                - --excluded-table-regex
-                - "{{job.parameters.excluded_table_regex}}"
-        - task_key: export_workbooks
-          depends_on:
-            - task_key: ingest
-          run_if: ALL_DONE
-          environment_key: framework
-          max_retries: 2
-          min_retry_interval_millis: 60000
-          timeout_seconds: 7200
-          python_wheel_task:
-            package_name: phi_framework
-            entry_point: export
-            parameters:
-                - --env
-                - "{{job.parameters.env}}"
-                - --process-name
-                - "{{job.parameters.process_name}}"
-                - --run-id
-                - "{{job.parameters.run_id}}"
-                - --governance-catalog
-                - "{{job.parameters.governance_catalog}}"
-                - --governance-schema
-                - "{{job.parameters.governance_schema}}"
-                - --governed-catalog-prefix
-                - "{{job.parameters.governed_catalog_prefix}}"
-                - --tag-key
-                - "{{job.parameters.tag_key}}"
-                - --governance-group
-                - "{{job.parameters.governance_group}}"
-                - --data-classification-table
-                - "{{job.parameters.data_classification_table}}"
-                - --review-due-business-days
-                - "{{job.parameters.review_due_business_days}}"
-                - --business-timezone
-                - "{{job.parameters.business_timezone}}"
-                - --detect-orphaned-tags
-                - "{{job.parameters.detect_orphaned_tags}}"
-                - --workbook-protection-password
-                - "{{job.parameters.workbook_protection_password}}"
                 - --allowed-values-override
                 - "{{job.parameters.allowed_values_override}}"
                 - --excluded-table-regex

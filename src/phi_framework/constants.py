@@ -6,7 +6,7 @@ Every value list here is also rendered into a Delta CHECK constraint by
 
 FRAMEWORK_VERSION = "1.0.0"
 
-# --- Table and volume names (inside <governance_catalog>.<governance_schema>) ---
+# --- Table names (inside <governance_catalog>.<governance_schema>) ---
 T_SCOPE = "classification_scope_registry"
 T_BATCH = "classification_review_batch"
 T_ITEM = "classification_review_item"
@@ -15,12 +15,14 @@ T_PLAN = "classification_application_plan"
 T_EVENT = "classification_review_event"
 T_MAPPING = "classification_suggestion_mapping"
 T_SUBMISSION = "classification_review_submission"
-V_FILES = "classification_review_files"
 
 ALL_TABLES = [T_SCOPE, T_MAPPING, T_BATCH, T_ITEM, T_ATTESTATION, T_PLAN, T_EVENT, T_SUBMISSION]
 
-# Tables Data Governance may edit directly (audit process = MANUAL).
+# Reference tables Data Governance maintains, through the review App or (for bootstrap and
+# break-glass changes) directly with audit process = MANUAL.
 MANUAL_EDIT_TABLES = {T_SCOPE, T_MAPPING}
+# Tables the review App writes: submissions, reference-data edits, and their audit events.
+APP_WRITE_TABLES = {T_SUBMISSION, T_SCOPE, T_MAPPING, T_EVENT}
 # Tables that are never updated or deleted after a row is written.
 APPEND_ONLY_TABLES = {T_PLAN, T_EVENT, T_SUBMISSION}
 
@@ -31,10 +33,16 @@ ROLE_SCAN = "phi_classification_scan"
 ROLE_INGESTION = "phi_decision_ingestion"
 ROLE_APPLICATION = "phi_classification_application"
 ROLES = [ROLE_SCAN, ROLE_INGESTION, ROLE_APPLICATION]
+# The review App is not a job; it records its writes under "<env>_phi_review_app".
+ROLE_APP = "phi_review_app"
 
 
 def process_names(env: str) -> list[str]:
     return [f"{env}_{role}" for role in ROLES]
+
+
+def app_process_name(env: str) -> str:
+    return f"{env}_{ROLE_APP}"
 
 
 ENVIRONMENTS = ["dev", "qa", "prod"]
@@ -71,6 +79,8 @@ ITEM_STATUSES = [
 ]
 TERMINAL_STATUSES = [TAG_VERIFIED, ATTESTED_NOT_PHI, CLOSED_NO_ACTION]
 NON_TERMINAL_STATUSES = [s for s in ITEM_STATUSES if s not in TERMINAL_STATUSES]
+# Statuses the App shows as awaiting a reviewer decision.
+REVIEWABLE_STATUSES = [PENDING_STEWARD_REVIEW, VALIDATION_FAILED]
 # Statuses on which ingestion may record a decision.
 DECISION_ELIGIBLE_STATUSES = [PENDING_STEWARD_REVIEW, VALIDATION_FAILED, NEEDS_PRIVACY_REVIEW]
 # Statuses whose decision has already been accepted (changes are ignored and reported).
@@ -114,8 +124,9 @@ ATTESTATION_TYPES = [CONFIRMED_NOT_PHI]
 EV_BATCH_CREATED = "BATCH_CREATED"
 EV_ITEM_OPENED = "ITEM_OPENED"
 EV_ITEM_CLOSED = "ITEM_CLOSED"
-EV_STEWARD_ASSIGNED = "STEWARD_ASSIGNED"
-EV_WORKBOOK_INGESTED = "WORKBOOK_INGESTED"
+EV_REVIEW_REQUEST_SENT = "REVIEW_REQUEST_SENT"
+EV_REVIEW_REQUEST_FAILED = "REVIEW_REQUEST_FAILED"
+EV_SUBMISSION_PROCESSED = "SUBMISSION_PROCESSED"
 EV_DECISION_RECEIVED = "DECISION_RECEIVED"
 EV_VALIDATION_FAILED = "VALIDATION_FAILED"
 EV_CHANGE_IGNORED = "CHANGE_IGNORED_ALREADY_RESOLVED"
@@ -127,13 +138,16 @@ EV_TAG_REMOVED = "TAG_REMOVED"
 EV_APPLICATION_FAILED = "APPLICATION_FAILED"
 EV_BATCH_CLOSED = "BATCH_CLOSED"
 EV_BATCH_ERROR = "BATCH_ERROR"
-EV_WORKBOOK_REJECTED = "WORKBOOK_REJECTED"
+EV_SCOPE_REGISTRY_UPDATED = "SCOPE_REGISTRY_UPDATED"
+EV_SUGGESTION_MAPPING_UPDATED = "SUGGESTION_MAPPING_UPDATED"
+EV_CORRECTION_REQUESTED = "CORRECTION_REQUESTED"
 EVENT_TYPES = [
     EV_BATCH_CREATED,
     EV_ITEM_OPENED,
     EV_ITEM_CLOSED,
-    EV_STEWARD_ASSIGNED,
-    EV_WORKBOOK_INGESTED,
+    EV_REVIEW_REQUEST_SENT,
+    EV_REVIEW_REQUEST_FAILED,
+    EV_SUBMISSION_PROCESSED,
     EV_DECISION_RECEIVED,
     EV_VALIDATION_FAILED,
     EV_CHANGE_IGNORED,
@@ -145,15 +159,15 @@ EVENT_TYPES = [
     EV_APPLICATION_FAILED,
     EV_BATCH_CLOSED,
     EV_BATCH_ERROR,
-    EV_WORKBOOK_REJECTED,
+    EV_SCOPE_REGISTRY_UPDATED,
+    EV_SUGGESTION_MAPPING_UPDATED,
+    EV_CORRECTION_REQUESTED,
 ]
+# review_batch_id recorded on App events that do not belong to a review batch
+# (reference-data edits and correction requests). Foreign keys are informational.
+REFERENCE_DATA_BATCH_ID = "REFERENCE_DATA"
 
-# --- Submission records (the contract shared by the Excel pilot and the Phase 2 App) ---
-SOURCE_WORKBOOK = "WORKBOOK"
-SOURCE_APP = "APP"
-SOURCE_TYPES = [SOURCE_WORKBOOK, SOURCE_APP]
-
-WB_ASSIGNMENT = "ASSIGNMENT"
-WB_REVIEW = "REVIEW"
-WB_PRIVACY = "PRIVACY"
-SUBMISSION_TYPES = [WB_ASSIGNMENT, WB_REVIEW, WB_PRIVACY]
+# --- Submission records written by the review App and validated by ingestion ---
+SUB_REVIEW = "REVIEW"  # reviewer decision on an item awaiting review
+SUB_PRIVACY = "PRIVACY"  # Privacy outcome recorded by Data Governance or the scope's governance owner
+SUBMISSION_TYPES = [SUB_REVIEW, SUB_PRIVACY]

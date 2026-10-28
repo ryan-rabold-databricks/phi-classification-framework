@@ -1,5 +1,5 @@
-# <env>_phi_classification_scan: weekly metadata scan, then assignment/review workbook export.
-# Data Governance runs it on demand with correction_* parameters to open a CORRECTION_REQUESTED item.
+# <env>_phi_classification_scan: weekly metadata scan, then review-request emails to each scope's reviewers.
+# The review App runs it on demand with correction_* parameters to open a CORRECTION_REQUESTED item.
 resources:
   jobs:
     phi_classification_scan:
@@ -35,12 +35,22 @@ resources:
           default: ${var.business_timezone}
         - name: detect_orphaned_tags
           default: ${var.detect_orphaned_tags}
-        - name: workbook_protection_password
-          default: ${var.workbook_protection_password}
         - name: allowed_values_override
           default: ${var.allowed_values_override}
         - name: excluded_table_regex
           default: ${var.excluded_table_regex}
+        - name: review_app_name
+          default: ${var.review_app_name}
+        - name: smtp_host
+          default: ${var.smtp_host}
+        - name: smtp_port
+          default: ${var.smtp_port}
+        - name: smtp_sender
+          default: ${var.smtp_sender}
+        - name: smtp_secret_scope
+          default: ${var.smtp_secret_scope}
+        - name: smtp_use_tls
+          default: ${var.smtp_use_tls}
         - name: correction_column
           default: ""
         - name: correction_reason
@@ -81,8 +91,6 @@ resources:
                 - "{{job.parameters.business_timezone}}"
                 - --detect-orphaned-tags
                 - "{{job.parameters.detect_orphaned_tags}}"
-                - --workbook-protection-password
-                - "{{job.parameters.workbook_protection_password}}"
                 - --allowed-values-override
                 - "{{job.parameters.allowed_values_override}}"
                 - --excluded-table-regex
@@ -93,16 +101,17 @@ resources:
                 - "{{job.parameters.correction_reason}}"
                 - --correction-requested-by
                 - "{{job.parameters.correction_requested_by}}"
-        - task_key: export_workbooks
+        - task_key: notify_reviewers
           depends_on:
             - task_key: scan
+          run_if: ALL_SUCCESS
           environment_key: framework
-          max_retries: 2
+          max_retries: 0  # a retry could resend emails for batches sent before a failure
           min_retry_interval_millis: 60000
           timeout_seconds: 7200
           python_wheel_task:
             package_name: phi_framework
-            entry_point: export
+            entry_point: notify
             parameters:
                 - --env
                 - "{{job.parameters.env}}"
@@ -128,12 +137,22 @@ resources:
                 - "{{job.parameters.business_timezone}}"
                 - --detect-orphaned-tags
                 - "{{job.parameters.detect_orphaned_tags}}"
-                - --workbook-protection-password
-                - "{{job.parameters.workbook_protection_password}}"
                 - --allowed-values-override
                 - "{{job.parameters.allowed_values_override}}"
                 - --excluded-table-regex
                 - "{{job.parameters.excluded_table_regex}}"
+                - --review-app-name
+                - "{{job.parameters.review_app_name}}"
+                - --smtp-host
+                - "{{job.parameters.smtp_host}}"
+                - --smtp-port
+                - "{{job.parameters.smtp_port}}"
+                - --smtp-sender
+                - "{{job.parameters.smtp_sender}}"
+                - --smtp-secret-scope
+                - "{{job.parameters.smtp_secret_scope}}"
+                - --smtp-use-tls
+                - "{{job.parameters.smtp_use_tls}}"
       environments:
         - environment_key: framework
           spec:
@@ -144,4 +163,7 @@ resources:
         - group_name: ${var.platform_group}
           level: CAN_MANAGE
         - group_name: ${var.governance_group}
+          level: CAN_MANAGE_RUN
+        # The review App starts on-demand correction scans.
+        - service_principal_name: ${resources.apps.phi_review_app.service_principal_client_id}
           level: CAN_MANAGE_RUN

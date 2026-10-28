@@ -46,9 +46,27 @@ variables:
   detect_orphaned_tags:
     description: Open ORPHANED_TAG items for tags without framework review evidence. Off for the pilot.
     default: "false"
-  workbook_protection_password:
-    description: Excel sheet-protection password. Prevents accidental edits only; it is not a security control.
-    default: phi-review
+  review_app_name:
+    description: Name of the review App in this workspace (<=30 chars, lowercase and hyphens). Emails link to it.
+  warehouse_id:
+    description: SQL warehouse the review App uses to read queues and write submissions.
+  review_app_users_group:
+    description: Group granted CAN_USE on the review App; include every steward and governance owner.
+  smtp_host:
+    description: SMTP relay for review-request emails. Empty disables email; reviewers still see queues in the App.
+    default: ""
+  smtp_port:
+    description: SMTP port (587 for STARTTLS).
+    default: "587"
+  smtp_sender:
+    description: From address on review-request emails. Required when smtp_host is set.
+    default: ""
+  smtp_secret_scope:
+    description: Secret scope holding optional smtp_username and smtp_password keys. Empty for an unauthenticated relay.
+    default: ""
+  smtp_use_tls:
+    description: Use STARTTLS when connecting to the SMTP relay.
+    default: "true"
   allowed_values_override:
     description: dev only. Comma-separated allowed values used instead of the governed-tag policy (sandboxes only).
     default: ""

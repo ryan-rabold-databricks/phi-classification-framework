@@ -32,8 +32,10 @@ class TableDef:
     append_only: bool = False
 
 
-def _audit_cols(manual_allowed: bool, created_only: bool) -> list[Col]:
+def _audit_cols(manual_allowed: bool, created_only: bool, app_allowed: bool = False) -> list[Col]:
     run_nn = not manual_allowed
+    writer = "Logical job name" + (" or the review App process" if app_allowed else "")
+    run = "Lakeflow job run" + (" or App request id" if app_allowed else "")
     cols = [
         Col("audit_created_at", "TIMESTAMP", True, "When the row was inserted."),
         Col("audit_created_by", "STRING", True, "Identity that inserted the row (current_user())."),
@@ -41,13 +43,13 @@ def _audit_cols(manual_allowed: bool, created_only: bool) -> list[Col]:
             "audit_created_process",
             "STRING",
             True,
-            "Logical job name that inserted the row" + (", or MANUAL for an approved manual change." if manual_allowed else "."),
+            f"{writer} that inserted the row" + (", or MANUAL for an approved manual change." if manual_allowed else "."),
         ),
         Col(
             "audit_created_run_id",
             "STRING",
             run_nn,
-            "Lakeflow job run that inserted the row" + ("; NULL for manual changes." if manual_allowed else "."),
+            f"{run} that inserted the row" + ("; NULL for manual changes." if manual_allowed else "."),
         ),
     ]
     if created_only:
@@ -59,23 +61,23 @@ def _audit_cols(manual_allowed: bool, created_only: bool) -> list[Col]:
             "audit_updated_process",
             "STRING",
             True,
-            "Logical job name that last changed the row" + (", or MANUAL." if manual_allowed else "."),
+            f"{writer} that last changed the row" + (", or MANUAL." if manual_allowed else "."),
         ),
         Col(
             "audit_updated_run_id",
             "STRING",
             run_nn,
-            "Lakeflow job run that last changed the row" + ("; NULL for manual changes." if manual_allowed else "."),
+            f"{run} that last changed the row" + ("; NULL for manual changes." if manual_allowed else "."),
         ),
     ]
 
 
 def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
     jobs = c.process_names(env)
-    jobs_or_manual = jobs + [c.MANUAL_PROCESS]
 
-    def process_checks(manual_allowed: bool, created_only: bool) -> dict[str, str]:
-        allowed = in_list(jobs_or_manual if manual_allowed else jobs)
+    def process_checks(manual_allowed: bool, created_only: bool, app_allowed: bool = False) -> dict[str, str]:
+        writers = jobs + ([c.app_process_name(env)] if app_allowed else []) + ([c.MANUAL_PROCESS] if manual_allowed else [])
+        allowed = in_list(writers)
         checks = {"valid_audit_created_process": f"audit_created_process IN ({allowed})"}
         if not created_only:
             checks["valid_audit_updated_process"] = f"audit_updated_process IN ({allowed})"
@@ -90,19 +92,20 @@ def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
             Col("schema_name", "STRING", True, "Schema name, or * for every schema in the catalog."),
             Col("environment", "STRING", True, "Deployment environment the scope belongs to: dev, qa, or prod."),
             Col("risk_tier", "STRING", True, "HIGH (3-month recertification) or STANDARD (6-month)."),
-            Col("steward_group", "STRING", True, "Group authorized to review the scoped domain."),
-            Col("governance_owner", "STRING", True, "Data Governance owner accountable for the scope."),
+            Col("steward_group", "STRING", True, "Reviewers for the scope: one user email or one group name. Every member is notified of new review items."),
+            Col("governance_owner", "STRING", True, "Data Governance owner for the scope: one user email or one group name. Copied on review requests and may review in place of a steward."),
             Col("scan_enabled", "BOOLEAN", True, "Whether the scheduled scan includes the scope."),
             Col("effective_date", "DATE", True, "Date on which the scope becomes active."),
             Col("expiration_date", "DATE", False, "Optional date on which the scope stops being active."),
         ]
-        + _audit_cols(manual_allowed=True, created_only=False),
+        + _audit_cols(manual_allowed=True, created_only=False, app_allowed=True),
         pk=["scope_id"],
         checks={
             "valid_environment": f"environment IN ({in_list(c.ENVIRONMENTS)})",
             "catalog_matches_environment": f"environment = {lit(env)} AND startswith(catalog_name, {lit(governed_catalog_prefix)})",
             "valid_risk_tier": f"risk_tier IN ({in_list(c.RISK_TIERS)})",
-            **process_checks(True, False),
+            "reviewers_trimmed": "steward_group = trim(steward_group) AND governance_owner = trim(governance_owner) AND steward_group <> '' AND governance_owner <> ''",
+            **process_checks(True, False, app_allowed=True),
         },
     )
 
@@ -115,9 +118,9 @@ def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
             Col("is_active", "BOOLEAN", True, "Whether the scan uses this mapping."),
             Col("notes", "STRING", False, "Data Governance rationale for the mapping."),
         ]
-        + _audit_cols(manual_allowed=True, created_only=False),
+        + _audit_cols(manual_allowed=True, created_only=False, app_allowed=True),
         pk=["class_tag"],
-        checks={"class_tag_trimmed": "class_tag = trim(class_tag)", **process_checks(True, False)},
+        checks={"class_tag_trimmed": "class_tag = trim(class_tag)", **process_checks(True, False, app_allowed=True)},
     )
 
     batch = TableDef(
@@ -157,12 +160,12 @@ def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
             Col("current_tag_value", "STRING", False, "Observed direct tag value when scanned (never constrained, so invalid values can be recorded)."),
             Col("suggested_tag_value", "STRING", False, "Proposed governed-tag value; NULL when no approved suggestion exists."),
             Col("suggestion_reason", "STRING", False, "Source of the suggestion: class tag, confidence, frequency, and detection time."),
-            Col("assigned_steward", "STRING", False, "Data Steward accountable for the item; a member of the scope's steward_group."),
+            Col("assigned_steward", "STRING", False, "Reviewers for the item: the scope's steward_group (one user email or one group name), refreshed by each scan."),
             Col("decision", "STRING", False, "Ratification decision supplied by the Data Steward."),
             Col("corrected_tag_value", "STRING", False, "Replacement allowed value when the suggestion is corrected."),
             Col("steward_comment", "STRING", False, "Steward rationale or supporting comment."),
-            Col("reviewed_by", "STRING", False, "Identity of the reviewer who made the decision."),
-            Col("reviewed_at", "TIMESTAMP", False, "Reviewer-entered decision time, stored in UTC."),
+            Col("reviewed_by", "STRING", False, "Authenticated identity of the reviewer who made the decision (captured by the review App)."),
+            Col("reviewed_at", "TIMESTAMP", False, "When the reviewer submitted the decision in the review App, in UTC."),
             Col("status", "STRING", True, "Controlled workflow state."),
             Col("applied_at", "TIMESTAMP", False, "When the planned action completed and was verified."),
             Col("application_error", "STRING", False, "Application or verification error, when present."),
@@ -247,52 +250,51 @@ def table_defs(env: str, governed_catalog_prefix: str) -> list[TableDef]:
         comment="Append-only workflow audit trail.",
         columns=[
             Col("event_id", "STRING", True, "Deterministic key: make_key('EVT', [event_type, review_batch_id, review_item_id, run_id, discriminator])."),
-            Col("review_batch_id", "STRING", True, "Batch associated with the event."),
+            Col("review_batch_id", "STRING", True, "Batch associated with the event, or REFERENCE_DATA for reference-data edits and correction requests."),
             Col("review_item_id", "STRING", False, "Review item associated with the event, when applicable."),
             Col("event_type", "STRING", True, "Workflow transition or activity being recorded."),
             Col("event_timestamp", "TIMESTAMP", True, "When the event occurred."),
             Col("business_actor", "STRING", False, "Business user responsible for the underlying decision."),
             Col("event_details", "VARIANT", False, "Structured details specific to the event type."),
-            Col("discriminator", "STRING", False, "SHA-256 of the source workbook for ingestion events; NULL otherwise."),
+            Col("discriminator", "STRING", False, "Submission set for ingestion events; record key for reference-data edits; NULL otherwise."),
         ]
-        + _audit_cols(manual_allowed=False, created_only=True),
+        + _audit_cols(manual_allowed=False, created_only=True, app_allowed=True),
         pk=["event_id"],
         fks=[("fk_event_batch", ["review_batch_id"], c.T_BATCH, ["review_batch_id"])],
         cluster_by=["review_batch_id"],
-        checks={"valid_event_type": f"event_type IN ({in_list(c.EVENT_TYPES)})", **process_checks(False, True)},
+        checks={"valid_event_type": f"event_type IN ({in_list(c.EVENT_TYPES)})", **process_checks(False, True, app_allowed=True)},
         append_only=True,
     )
 
     submission = TableDef(
         name=c.T_SUBMISSION,
         comment=(
-            "Normalized review submissions. The Excel pilot writes one row per returned workbook row; the "
-            "Phase 2 App writes the same records. Ingestion validates submissions, never workbooks directly."
+            "Reviewer decisions exactly as submitted in the review App. Ingestion validates each "
+            "submission and records the outcome on the review item and in the audit trail."
         ),
         columns=[
             Col("submission_id", "STRING", True, "Deterministic key: make_key('SUB', [submission_set_id, review_item_id])."),
-            Col("submission_set_id", "STRING", True, "Group of submissions processed together; SHA-256 of the workbook file for Excel."),
-            Col("source_type", "STRING", True, "WORKBOOK (Phase 1) or APP (Phase 2)."),
-            Col("source_path", "STRING", False, "Volume path of the source workbook."),
-            Col("submission_type", "STRING", True, "ASSIGNMENT, REVIEW, or PRIVACY."),
+            Col("submission_set_id", "STRING", True, "One App submit action (App request id); ingestion processes each set once."),
+            Col("submission_type", "STRING", True, "REVIEW for reviewer decisions, PRIVACY for Privacy outcomes."),
             Col("review_batch_id", "STRING", True, "Batch the submission refers to."),
             Col("review_item_id", "STRING", True, "Review item the submission refers to."),
-            Col("source_row_number", "INT", False, "Row number in the source workbook."),
-            Col("assigned_steward", "STRING", False, "Submitted steward assignment (ASSIGNMENT only)."),
-            Col("decision", "STRING", False, "Submitted decision, unvalidated."),
-            Col("corrected_tag_value", "STRING", False, "Submitted corrected value, unvalidated."),
+            Col("decision", "STRING", True, "Submitted decision, before validation."),
+            Col("corrected_tag_value", "STRING", False, "Submitted corrected value, before validation."),
             Col("steward_comment", "STRING", False, "Submitted comment."),
-            Col("reviewed_by", "STRING", False, "Submitted reviewer identity (self-reported in Phase 1; authenticated in Phase 2)."),
-            Col("reviewed_at_raw", "STRING", False, "Submitted decision time exactly as entered."),
-            Col("submitted_at", "TIMESTAMP", True, "When the submission was recorded."),
+            Col("suggested_tag_value_seen", "STRING", False, "Suggested value shown to the reviewer; APPROVE_SUGGESTION is rejected if it has since changed."),
+            Col("reviewed_by", "STRING", True, "Authenticated identity of the reviewer, captured by the App."),
+            Col("acting_as", "STRING", True, "Role the App authorized the reviewer in: STEWARD, GOVERNANCE_OWNER, or DATA_GOVERNANCE."),
+            Col("authorized_via", "STRING", True, "Scope steward_group, governance_owner, or Data Governance group the App matched to the reviewer's own groups or email."),
+            Col("reviewed_at", "TIMESTAMP", True, "When the reviewer submitted, captured by the App server in UTC."),
         ]
-        + _audit_cols(manual_allowed=False, created_only=True),
+        + _audit_cols(manual_allowed=False, created_only=True, app_allowed=True),
         pk=["submission_id"],
         cluster_by=["submission_set_id"],
         checks={
-            "valid_source_type": f"source_type IN ({in_list(c.SOURCE_TYPES)})",
             "valid_submission_type": f"submission_type IN ({in_list(c.SUBMISSION_TYPES)})",
-            **process_checks(False, True),
+            "reviewed_by_lower": "reviewed_by = lower(trim(reviewed_by))",
+            "valid_acting_as": f"acting_as IN ({in_list(['STEWARD', 'GOVERNANCE_OWNER', 'DATA_GOVERNANCE'])})",
+            **process_checks(False, True, app_allowed=True),
         },
         append_only=True,
     )

@@ -1,12 +1,16 @@
 """End-to-end test of the deployed framework against synthetic data in a dev sandbox.
 
-Drives the real jobs (setup, scan, ingestion, application) with run-now,
-edits the exported workbooks the way Data Governance and stewards would, and
-asserts every state transition. Synthetic data only.
+Drives the real jobs (setup, scan, ingestion, application) with run-now and the
+deployed review App over HTTPS as the signed-in user, the way stewards and Data
+Governance use it, and asserts every state transition. Synthetic data only.
 
-  uv run --with openpyxl python tests/integration/e2e_sandbox.py \
-      -p <profile> --warehouse-id <id> --test-schema-prefix phifw_test --reset \
+  uv run python tests/integration/e2e_sandbox.py \
+      -p <profile> --warehouse-id <id> --test-schema-prefix phifw_test \
       --steward-group <dev test steward group> --mapping <mapping CSV>
+
+A few deliberately invalid submissions are written directly to the submission
+table under the App's process name, to prove that ingestion rejects anything the
+App's own checks would have blocked.
 
 Bundle variables (governance catalog/schema, tag key, groups, ...) are read
 from `databricks bundle validate -t dev`. The current user must be a member of
@@ -25,29 +29,31 @@ scopes. The current user must be a member of it and of the bundle's governance_g
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 sys.path.insert(0, os.path.join(ROOT, "src"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
+import urllib.error
+import urllib.request
+import uuid
+
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.jobs import RunResultState
-from openpyxl import load_workbook
 from sqlexec import Sql
 
 from phi_framework import constants as c
 from phi_framework.keys import make_key, make_key_sql
 from phi_framework.sqlutil import fqn, lit, qi
-from phi_framework.workbook import DATA_SHEET
 
 RESULTS: list[tuple[str, bool, str]] = []
+FINANCE_STEWARD = "finance.steward@example.com"
 RESET_SAFE_PREFIX = "phifw_"
 
 
@@ -77,6 +83,7 @@ class E2E:
                            check=True, capture_output=True, text=True, cwd=ROOT).stdout
         )
         self.jobs = {k: int(j["id"]) for k, j in summary["resources"]["jobs"].items()}
+        self.app_url = self.w.apps.get(self.v["review_app_name"]).url.rstrip("/")
         self.gc, self.gs = self.v["governance_catalog"], self.v["governance_schema"]
         self.cat = self.gc  # sandbox: synthetic schemas live in the governance catalog
         self.tag = self.v["tag_key"]
@@ -92,7 +99,6 @@ class E2E:
                     f"throwaway schema (for example {RESET_SAFE_PREFIX}e2e) and keep --test-schema-prefix "
                     f"starting with {RESET_SAFE_PREFIX!r}."
                 )
-        self.vol = f"/Volumes/{self.gc}/{self.gs}/{c.V_FILES}"
         # Governed mode: a real tag policy enforces allowed values, so an invalid pre-existing tag
         # cannot be staged. The test pre-tags a valid value without review evidence instead and
         # runs scans with ORPHANED_TAG detection on.
@@ -151,42 +157,56 @@ class E2E:
     def events(self, event_type: str) -> list[dict]:
         return self.q(f"SELECT * FROM {self.t(c.T_EVENT)} WHERE event_type = {lit(event_type)}")
 
-    def outbound(self, wtype: str) -> list[str]:
-        paths = []
-        for d in self.w.files.list_directory_contents(f"{self.vol}/outbound"):
-            if d.is_directory:
-                for f in self.w.files.list_directory_contents(d.path):
-                    if f"__{wtype}__" in f.name:
-                        paths.append((f.last_modified, f.path))
-        return [p for _, p in sorted(paths)]
+    # ---------------- review App ----------------
+    def app(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+        """Call the deployed review App as the signed-in user (OAuth token from the CLI profile)."""
+        headers = {"Content-Type": "application/json", **self.w.config.authenticate()}
+        req = urllib.request.Request(f"{self.app_url}{path}", method=method, headers=headers,
+                                     data=json.dumps(body).encode() if body is not None else None)
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
 
-    def edit_and_upload(self, src_path: str, edits: dict, dest_name: str) -> str:
-        """edits: {(schema, table, column) | review_item_id: {column: value}}"""
-        data = self.w.files.download(src_path).contents.read()
-        wb = load_workbook(io.BytesIO(data))
-        ws = wb[DATA_SHEET]
-        headers = [cell.value for cell in ws[1]]
-        col = {h: i + 1 for i, h in enumerate(headers)}
-        applied = 0
-        for r in range(2, ws.max_row + 1):
-            row = {h: ws.cell(row=r, column=col[h]).value for h in headers}
-            keys = [row["review_item_id"], (row.get("schema_name"), row.get("table_name"), row.get("column_name"))]
-            for k in keys:
-                if k in edits:
-                    for h, v in edits[k].items():
-                        ws.cell(row=r, column=col[h], value=v)
-                    applied += 1
-        buf = io.BytesIO()
-        wb.save(buf)
-        dest = f"{self.vol}/inbound/{dest_name}"
-        self.w.files.upload(dest, io.BytesIO(buf.getvalue()), overwrite=False)
-        print(f"  uploaded {dest} ({applied} edited rows)")
-        return dest
+    def queue(self, kind: str = "review") -> dict[tuple[str, str, str], dict]:
+        status, body = self.app("GET", f"/api/review/queue?kind={kind}")
+        assert status == 200, body
+        return {(i["schema_name"], i["table_name"], i["column_name"]): i for i in body["items"]}
 
-    @staticmethod
-    def now_local(offset_minutes: int = -1) -> str:
-        t = datetime.now(timezone(timedelta(hours=-4))) + timedelta(minutes=offset_minutes)
-        return t.strftime("%Y-%m-%d %H:%M -04:00")
+    def submit(self, kind: str, decisions: dict, queue: dict) -> tuple[int, dict]:
+        """decisions: {(schema, table, column): {decision, corrected_tag_value?, steward_comment?}}"""
+        rows = [{"review_item_id": queue[k]["review_item_id"], "suggested_tag_value_seen": queue[k]["suggested_tag_value"], **d}
+                for k, d in decisions.items()]
+        return self.app("POST", "/api/review/submissions", {"kind": kind, "decisions": rows})
+
+    def inject(self, kind: str, item: dict, decision: str, *, by: str, acting_as: str, via: str,
+               corrected: str | None = None, comment: str | None = None) -> None:
+        """Write a submission directly, bypassing the App's checks, under the App's process name."""
+        set_id = f"E2E-{uuid.uuid4()}:{item['review_batch_id']}"
+        self.q(f"""INSERT INTO {self.t(c.T_SUBMISSION)} (submission_id, submission_set_id, submission_type, review_batch_id,
+            review_item_id, decision, corrected_tag_value, steward_comment, suggested_tag_value_seen, reviewed_by, acting_as,
+            authorized_via, reviewed_at, audit_created_at, audit_created_by, audit_created_process, audit_created_run_id)
+            VALUES ({lit(make_key('SUB', [set_id, item['review_item_id']]))},
+            {lit(set_id)}, {lit(kind)}, {lit(item['review_batch_id'])}, {lit(item['review_item_id'])}, {lit(decision)},
+            {lit(corrected)}, {lit(comment)}, {lit(item['suggested_tag_value'])}, {lit(by.lower())}, {lit(acting_as)},
+            {lit(via)}, current_timestamp(),
+            current_timestamp(), current_user(), {lit(c.app_process_name('dev'))}, 'E2E')""")
+
+    def errors_for(self, item_id: str) -> str:
+        return " ".join(r["d"] for r in self.q(
+            f"SELECT CAST(event_details AS STRING) AS d FROM {self.t(c.T_EVENT)} "
+            f"WHERE event_type = 'VALIDATION_FAILED' AND review_item_id = {lit(item_id)}"))
+
+    def wait_run(self, run_id: int) -> None:
+        while True:
+            run = self.w.jobs.get_run(run_id)
+            if run.state.life_cycle_state.value in ("TERMINATED", "INTERNAL_ERROR", "SKIPPED"):
+                break
+            time.sleep(10)
+        if run.state.result_state != RunResultState.SUCCESS:
+            raise RuntimeError(f"run {run_id} finished {run.state.result_state}: {run.state.state_message}")
+        print(f"  waited for run {run_id}")
 
     # ---------------- setup ----------------
     def reset(self) -> None:
@@ -210,17 +230,29 @@ class E2E:
         self.q(f"""CREATE OR REPLACE TABLE {fqn(C, self.clinical, 'lab_result')} (
             patient_mrn STRING COMMENT 'MRN of the patient', result_value DOUBLE COMMENT 'Numeric result',
             legacy_flag STRING COMMENT 'Pre-tagged with a value that is not allowed')""")
+        # Start from untagged synthetic columns: tags survive CREATE OR REPLACE and earlier runs.
+        for sch, tbl, cols in [
+            (self.clinical, "patient_encounter", ["patient_name", "mrn", "encounter_date", "source_system_code", "notes", "ssn"]),
+            (self.clinical, "lab_result", ["patient_mrn", "result_value", "legacy_flag"]),
+        ]:
+            for col in cols:
+                self.q(f"ALTER TABLE {fqn(C, sch, tbl)} ALTER COLUMN {qi(col)} UNSET TAGS ({lit(self.tag)})")
         pre_tag = self.mapping["class.name"] if self.governed else "retired_value"
         self.q(f"ALTER TABLE {fqn(C, self.clinical, 'lab_result')} ALTER COLUMN legacy_flag SET TAGS ({lit(self.tag)} = {lit(pre_tag)})")
         self.q(f"""CREATE OR REPLACE TABLE {fqn(C, self.finance, 'billing')} (
             account_number STRING COMMENT 'Billing account number', amount DECIMAL(10,2) COMMENT 'Charge amount',
             patient_email STRING COMMENT 'Patient email address')""")
+        for col in ["account_number", "amount", "patient_email"]:
+            self.q(f"ALTER TABLE {fqn(C, self.finance, 'billing')} ALTER COLUMN {qi(col)} UNSET TAGS ({lit(self.tag)})")
         self.mv = False
         if not self.a.skip_mv:
             try:
                 self.q(f"""CREATE OR REPLACE MATERIALIZED VIEW {fqn(C, self.clinical, 'encounter_summary_mv')}
                     COMMENT 'Synthetic MV' AS SELECT mrn, count(*) AS encounter_count
                     FROM {fqn(C, self.clinical, 'patient_encounter')} GROUP BY mrn""")
+                for col in ["mrn", "encounter_count"]:
+                    self.q(f"ALTER MATERIALIZED VIEW {fqn(C, self.clinical, 'encounter_summary_mv')} "
+                           f"ALTER COLUMN {qi(col)} UNSET TAGS ({lit(self.tag)})")
                 self.mv = True
             except Exception as exc:
                 print(f"  (materialized view skipped: {str(exc)[:200]})")
@@ -247,9 +279,11 @@ class E2E:
         )
         self.q(f"INSERT INTO {dc} VALUES {values}")
         stewards, gov = self.a.steward_group, self.v["governance_group"]
+        # Clinical: group reviewers. Finance: single-email reviewers; the current user is only the
+        # governance owner, so finance decisions exercise "owner reviews in place of a steward".
         scopes = f"""scope_id,catalog_name,schema_name,environment,risk_tier,steward_group,governance_owner,scan_enabled,effective_date,expiration_date
 SCOPE-CLINICAL-DEV,{C},{self.clinical},dev,HIGH,{stewards},{gov},true,2026-01-01,
-SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-01,
+SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},true,2026-01-01,
 """
         path = "/tmp/phifw_e2e_scopes.csv"
         with open(path, "w") as fh:
@@ -277,12 +311,14 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         print("== 1. Setup job is idempotent")
         self.run_job("phi_framework_setup")
 
-        print("== 2. First scan")
+        print("== 2. First scan routes items to each scope's reviewers")
         self.run_job("phi_classification_scan", self.scan_params)
         batches = self.q(f"SELECT * FROM {self.t(c.T_BATCH)}")
         check("two batches (one per scope)", len(batches) == 2, str(len(batches)))
         pn = self.item(cl, "patient_encounter", "patient_name")
         check("MISSING_CLASSIFICATION opened", pn and pn["issue_type"] == c.MISSING_CLASSIFICATION)
+        check("assigned_steward is the scope's steward_group", pn["assigned_steward"] == self.stewards
+              and self.item(fi, "billing", "amount")["assigned_steward"] == FINANCE_STEWARD)
         check("suggestion from DC", pn["suggested_tag_value"] == self.mapping["class.name"], str(pn["suggested_tag_value"]))
         check("conflicting detections -> no suggestion", self.item(cl, "patient_encounter", "notes")["suggested_tag_value"] is None)
         check("LOW confidence -> no suggestion", self.item(cl, "patient_encounter", "encounter_date")["suggested_tag_value"] is None)
@@ -298,81 +334,92 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         check("DC sample values never copied", int(leaked) == 0)
         n_items = int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ITEM)}"))
         check("every in-scope column has an item", n_items == (14 if self.mv else 12), str(n_items))
-        assign = self.outbound(c.WB_ASSIGNMENT)
-        check("assignment workbook per batch", len(assign) == 2, str(assign))
+        check("no review request without SMTP configured", len(self.events(c.EV_REVIEW_REQUEST_SENT)) == 0)
 
         print("== 3. Rerun scan with unchanged metadata opens nothing")
         self.run_job("phi_classification_scan", self.scan_params)
         check("no new items or batches",
               int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ITEM)}")) == n_items
               and int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_BATCH)}")) == 2)
-        check("no duplicate assignment workbooks", len(self.outbound(c.WB_ASSIGNMENT)) == 2)
 
-        print("== 4. Data Governance assigns stewards")
-        bogus = "not.a.steward@example.com"
-        for i, path in enumerate(assign):
-            edits = {}
-            data = self.w.files.download(path).contents.read()
-            ws = load_workbook(io.BytesIO(data))[DATA_SHEET]
-            hdr = [x.value for x in ws[1]]
-            for r in range(2, ws.max_row + 1):
-                iid = ws.cell(row=r, column=hdr.index("review_item_id") + 1).value
-                colname = ws.cell(row=r, column=hdr.index("column_name") + 1).value
-                edits[iid] = {"assigned_steward": bogus if colname == "amount" else self.me}
-            self.edit_and_upload(path, edits, f"assign_{i}_v1.xlsx")
-        self.run_job("phi_decision_ingestion")
-        check("stewards assigned", self.item(cl, "patient_encounter", "patient_name")["assigned_steward"] == self.me)
-        check("non-member assignment rejected", self.item(fi, "billing", "amount")["assigned_steward"] is None)
-        check("STEWARD_ASSIGNED events", len(self.events(c.EV_STEWARD_ASSIGNED)) == n_items - 1)
-        reviews = self.outbound(c.WB_REVIEW)
-        check("review workbook per batch for the steward", len(reviews) == 2, str(reviews))
-        check("re-export of assignment workbook for the rejected row", len(self.outbound(c.WB_ASSIGNMENT)) == 3)
-        reassign = self.outbound(c.WB_ASSIGNMENT)[-1]
-        self.edit_and_upload(reassign, {(fi, "billing", "amount"): {"assigned_steward": self.me}}, "assign_fin_v2.xlsx")
+        print("== 4. The App resolves the signed-in user's roles and queue")
+        status, me = self.app("GET", "/api/review/me")
+        roles = {s["scope_id"]: s["roles"] for s in me.get("scopes", [])}
+        check("App identifies the signed-in user", status == 200 and me["email"] == self.me, str(me)[:300])
+        check("steward of clinical via group", "STEWARD" in roles.get("SCOPE-CLINICAL-DEV", []), str(roles))
+        check("governance owner of finance via email", roles.get("SCOPE-FINANCE-DEV") == ["GOVERNANCE_OWNER"], str(roles))
+        check("Data Governance membership", me.get("isGovernance") is True)
+        q = self.queue()
+        check("queue lists every item in both scopes", len(q) == n_items, str(len(q)))
 
-        print("== 5. Steward decisions")
-        at = self.now_local()
+        print("== 5. Decisions through the App")
+        bad_status, bad = self.submit("REVIEW", {(cl, "lab_result", "patient_mrn"): {
+            "decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "not_a_value"}}, q)
+        check("App refuses a value outside the tag policy; nothing written", bad_status == 422
+              and int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_SUBMISSION)}")) == 0, str(bad)[:300])
         dec = {
-            (cl, "patient_encounter", "patient_name"): {"decision": c.APPROVE_SUGGESTION, "reviewed_at": at},
-            (cl, "patient_encounter", "mrn"): {"decision": c.APPROVE_SUGGESTION, "reviewed_at": at},
-            (cl, "patient_encounter", "ssn"): {"decision": c.APPROVE_SUGGESTION, "reviewed_at": at},
-            (cl, "patient_encounter", "encounter_date"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "date", "reviewed_at": at},
-            (cl, "patient_encounter", "source_system_code"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Technical source identifier only", "reviewed_at": at},
-            (cl, "patient_encounter", "notes"): {"decision": c.REQUEST_PRIVACY_REVIEW, "steward_comment": "Free text may contain names", "reviewed_at": at},
-            (cl, "lab_result", "patient_mrn"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "not_a_value", "reviewed_at": at},
-            (cl, "lab_result", "legacy_flag"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Legacy flag, not PHI", "reviewed_at": at},
-            (cl, "encounter_summary_mv", "mrn"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn", "reviewed_at": at},
-            (cl, "encounter_summary_mv", "encounter_count"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Aggregate count", "reviewed_at": at},
-            (fi, "billing", "account_number"): {"decision": c.APPROVE_SUGGESTION, "reviewed_at": at},
-            (fi, "billing", "patient_email"): {"decision": c.APPROVE_SUGGESTION, "reviewed_at": "10/14/2026 11:40"},
+            (cl, "patient_encounter", "patient_name"): {"decision": c.APPROVE_SUGGESTION},
+            (cl, "patient_encounter", "mrn"): {"decision": c.APPROVE_SUGGESTION},
+            (cl, "patient_encounter", "ssn"): {"decision": c.APPROVE_SUGGESTION},
+            (cl, "patient_encounter", "encounter_date"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "date"},
+            (cl, "patient_encounter", "source_system_code"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Technical source identifier only"},
+            (cl, "patient_encounter", "notes"): {"decision": c.REQUEST_PRIVACY_REVIEW, "steward_comment": "Free text may contain names"},
+            (cl, "lab_result", "legacy_flag"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Legacy flag, not PHI"},
+            (fi, "billing", "account_number"): {"decision": c.APPROVE_SUGGESTION},
         }
-        uploaded = {}
-        for i, path in enumerate(reviews):
-            uploaded[path] = self.edit_and_upload(path, dec, f"review_{i}_v1.xlsx")
+        if self.mv:
+            dec[(cl, "encounter_summary_mv", "mrn")] = {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn"}
+            dec[(cl, "encounter_summary_mv", "encounter_count")] = {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Aggregate count"}
+        status, body = self.submit("REVIEW", dec, q)
+        check("App accepts valid decisions", status == 200 and body.get("submitted") == len(dec), str(body)[:300])
+        check("one submission set per batch", int(self.sql.scalar(
+            f"SELECT count(DISTINCT submission_set_id) FROM {self.t(c.T_SUBMISSION)}")) == 2)
+        sub = self.q(f"SELECT * FROM {self.t(c.T_SUBMISSION)} LIMIT 1")[0]
+        check("submission carries the authenticated reviewer and App process",
+              sub["reviewed_by"] == self.me and sub["audit_created_process"] == c.app_process_name("dev"), str(sub)[:300])
+        auth = {(r["acting_as"], r["authorized_via"]) for r in self.q(f"SELECT DISTINCT acting_as, authorized_via FROM {self.t(c.T_SUBMISSION)}")}
+        check("App records the role and the scope value that authorized it",
+              auth == {("STEWARD", self.stewards), ("GOVERNANCE_OWNER", self.me)}, str(auth))
+        # Bypass the App: ingestion must still reject an invalid value and an authorization that does not
+        # match the scope's current reviewers.
+        self.inject(c.SUB_REVIEW, self.item(cl, "lab_result", "patient_mrn"), c.CORRECT_CLASSIFICATION, by=self.me,
+                    acting_as="STEWARD", via=self.stewards, corrected="not_a_value")
+        self.inject(c.SUB_REVIEW, self.item(fi, "billing", "patient_email"), c.APPROVE_SUGGESTION, by="not.a.reviewer@example.com",
+                    acting_as="STEWARD", via="phifw_not_the_finance_reviewers")
         self.run_job("phi_decision_ingestion")
         check("approve -> PLANNED", self.item(cl, "patient_encounter", "patient_name")["status"] == c.PLANNED)
         check("correct -> PLANNED", self.item(cl, "patient_encounter", "encounter_date")["status"] == c.PLANNED)
         check("not PHI (untagged) -> ATTESTED_NOT_PHI", self.item(cl, "patient_encounter", "source_system_code")["status"] == c.ATTESTED_NOT_PHI)
         check("not PHI (tagged) -> PLANNED removal", self.item(cl, "lab_result", "legacy_flag")["status"] == c.PLANNED)
         check("privacy request -> NEEDS_PRIVACY_REVIEW", self.item(cl, "patient_encounter", "notes")["status"] == c.NEEDS_PRIVACY_REVIEW)
-        check("invalid corrected value -> VALIDATION_FAILED", self.item(cl, "lab_result", "patient_mrn")["status"] == c.VALIDATION_FAILED)
-        check("bad reviewed_at -> VALIDATION_FAILED", self.item(fi, "billing", "patient_email")["status"] == c.VALIDATION_FAILED)
+        check("ingestion rejects a value outside the policy", self.item(cl, "lab_result", "patient_mrn")["status"] == c.VALIDATION_FAILED)
+        email_item = self.item(fi, "billing", "patient_email")
+        check("ingestion rejects an unauthorized reviewer", email_item["status"] == c.VALIDATION_FAILED
+              and "not a reviewer for this scope" in self.errors_for(email_item["review_item_id"]))
+        acting = self.q(f"""SELECT CAST(e.event_details:acting_as AS STRING) AS a FROM {self.t(c.T_EVENT)} e
+            JOIN {self.t(c.T_ITEM)} i ON i.review_item_id = e.review_item_id
+            WHERE e.event_type = 'DECISION_RECEIVED' AND i.table_name = 'billing' AND i.column_name = 'account_number'""")
+        check("governance owner decision recorded as GOVERNANCE_OWNER", acting and acting[0]["a"] == "GOVERNANCE_OWNER", str(acting))
+        check("each set processed once", len(self.events(c.EV_SUBMISSION_PROCESSED)) == 4)
         att = self.q(f"SELECT * FROM {self.t(c.T_ATTESTATION)} WHERE column_name = 'source_system_code'")[0]
-        months = (datetime.fromisoformat(att["expires_at"][:19]) - datetime.fromisoformat(att["attested_at"][:19])).days
-        check("HIGH-tier attestation expires in ~3 months", 88 <= months <= 93, str(months))
+        days = (datetime.fromisoformat(att["expires_at"][:19]) - datetime.fromisoformat(att["attested_at"][:19])).days
+        check("HIGH-tier attestation expires in ~3 months", 88 <= days <= 93, str(days))
         plan = self.q(f"SELECT * FROM {self.t(c.T_PLAN)} WHERE column_name = 'legacy_flag'")[0]
         check("removal plan renders UNSET TAGS", plan["action_type"] == c.REMOVE_PHI_TAG and "UNSET TAGS" in plan["rendered_ddl"])
         if self.mv:
             mvp = self.q(f"SELECT rendered_ddl FROM {self.t(c.T_PLAN)} WHERE table_name = 'encounter_summary_mv'")[0]
             check("MV plan uses ALTER MATERIALIZED VIEW", mvp["rendered_ddl"].startswith("ALTER MATERIALIZED VIEW"))
-        check("privacy workbook exported", len(self.outbound(c.WB_PRIVACY)) == 1)
+        q = self.queue()
+        check("returned items show the rejection reason in the App",
+              "allowed" in (q[(cl, "lab_result", "patient_mrn")]["last_errors"] or ""), str(q.get((cl, "lab_result", "patient_mrn")))[:300])
 
-        print("== 6. Plans are append-only")
-        try:
-            self.q(f"UPDATE {self.t(c.T_PLAN)} SET rendered_ddl = 'x'")
-            check("UPDATE on plan rejected", False, "update succeeded")
-        except RuntimeError as exc:
-            check("UPDATE on plan rejected", "APPEND_ONLY" in str(exc).upper() or "append" in str(exc).lower(), str(exc)[:200])
+        print("== 6. Plans and submissions are append-only")
+        for tname in (c.T_PLAN, c.T_SUBMISSION):
+            try:
+                self.q(f"UPDATE {self.t(tname)} SET review_item_id = 'x'")
+                check(f"UPDATE on {tname} rejected", False, "update succeeded")
+            except RuntimeError as exc:
+                check(f"UPDATE on {tname} rejected", "append" in str(exc).lower(), str(exc)[:200])
 
         print("== 7. Tag application")
         self.run_job("phi_classification_application")
@@ -385,45 +432,41 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
             check("MV column tagged", self.tag_value(cl, "encounter_summary_mv", "mrn") == "mrn")
 
         print("== 8. Privacy outcome, rejected-row fixes, and an ignored change")
-        priv = self.outbound(c.WB_PRIVACY)[-1]
-        first_review = next(p for p in reviews if self.item(cl, "patient_encounter", "patient_name")["review_batch_id"] in p)
-        notes_id = self.item(cl, "patient_encounter", "notes")["review_item_id"]
-        # A steward's REVIEW workbook cannot resolve a Privacy item, and a rejected Privacy outcome must
-        # leave the item in Privacy review (otherwise the valid outcome below would be refused).
-        self.edit_and_upload(first_review, {(cl, "patient_encounter", "notes"): {
-            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "steward tries to close it", "reviewed_at": self.now_local()}},
-            "review_notes_misdirected.xlsx")
-        self.edit_and_upload(priv, {(cl, "patient_encounter", "notes"): {
-            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "not from governance", "reviewed_by": "not.gov@example.com",
-            "reviewed_at": self.now_local()}}, "privacy_bad.xlsx")
-        self.edit_and_upload(priv, {(cl, "patient_encounter", "notes"): {
-            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "Privacy: notes are system-generated", "reviewed_by": self.me,
-            "reviewed_at": self.now_local(-5)}}, "privacy_v1.xlsx")
-        # Revised copy of an already-accepted workbook changes an accepted decision -> ignored and reported.
-        self.edit_and_upload(first_review, {**dec, (cl, "patient_encounter", "patient_name"): {
-            "decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn", "reviewed_at": at}}, "review_clinical_v2.xlsx")
+        notes = self.item(cl, "patient_encounter", "notes")
+        status, _ = self.submit("REVIEW", {(cl, "patient_encounter", "notes"): {
+            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "steward tries to close it"}},
+            {(cl, "patient_encounter", "notes"): notes})
+        check("App refuses a review decision on a Privacy item", status == 422)
+        self.inject(c.SUB_REVIEW, notes, c.CONFIRM_NOT_PHI, by=self.me, acting_as="STEWARD", via=self.stewards,
+                    comment="steward tries to close it")
+        self.inject(c.SUB_PRIVACY, notes, c.CONFIRM_NOT_PHI, by="not.gov@example.com", acting_as="DATA_GOVERNANCE",
+                    via="phifw_not_the_governance_group", comment="not from governance")
         self.run_job("phi_decision_ingestion")
-        notes_errors = " ".join(r["d"] for r in self.q(
-            f"SELECT CAST(event_details AS STRING) AS d FROM {self.t(c.T_EVENT)} "
-            f"WHERE event_type = 'VALIDATION_FAILED' AND review_item_id = {lit(notes_id)}"))
-        check("REVIEW workbook cannot resolve a Privacy item", "only a PRIVACY workbook" in notes_errors, notes_errors[:300])
-        check("non-governance Privacy outcome rejected", "to record a Privacy outcome" in notes_errors, notes_errors[:300])
+        errs = self.errors_for(notes["review_item_id"])
+        check("ingestion: review decision cannot resolve a Privacy item", "Privacy review queue" in errs, errs[:300])
+        check("ingestion: non-governance Privacy outcome rejected", "to record a Privacy outcome" in errs, errs[:300])
+        check("rejected Privacy outcomes keep the item in Privacy review",
+              self.item(cl, "patient_encounter", "notes")["status"] == c.NEEDS_PRIVACY_REVIEW)
+        pq = self.queue("privacy")
+        status, body = self.submit("PRIVACY", {(cl, "patient_encounter", "notes"): {
+            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "Privacy: notes are system-generated"}}, pq)
+        check("App accepts the Privacy outcome", status == 200, str(body)[:300])
+        # A change to an accepted decision is ignored and reported.
+        self.inject(c.SUB_REVIEW, self.item(cl, "patient_encounter", "patient_name"), c.CORRECT_CLASSIFICATION, by=self.me,
+                    acting_as="STEWARD", via=self.stewards, corrected="mrn")
+        q = self.queue()
+        status, body = self.submit("REVIEW", {
+            (cl, "lab_result", "patient_mrn"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn"},
+            (cl, "lab_result", "result_value"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Lab value without identifiers"},
+            (fi, "billing", "patient_email"): {"decision": c.APPROVE_SUGGESTION},
+            (fi, "billing", "amount"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Amount only"},
+        }, q)
+        check("App accepts the fixes", status == 200, str(body)[:300])
+        self.run_job("phi_decision_ingestion")
+        self.run_job("phi_classification_application")
         check("privacy outcome -> ATTESTED_NOT_PHI", self.item(cl, "patient_encounter", "notes")["status"] == c.ATTESTED_NOT_PHI)
         check("change to accepted item ignored", len(self.events(c.EV_CHANGE_IGNORED)) >= 1
               and self.tag_value(cl, "patient_encounter", "patient_name") == self.mapping["class.name"])
-        follow_ups = [p for p in self.outbound(c.WB_REVIEW) if p not in reviews]
-        check("follow-up review workbooks exported", len(follow_ups) >= 1, str(follow_ups))
-        fix = {
-            (cl, "lab_result", "patient_mrn"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn", "reviewed_at": self.now_local(-2)},
-            (cl, "lab_result", "result_value"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Lab value without identifiers", "reviewed_at": self.now_local(-2)},
-            (fi, "billing", "patient_email"): {"decision": c.APPROVE_SUGGESTION, "reviewed_at": self.now_local(-2)},
-            (fi, "billing", "amount"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Amount only", "reviewed_at": self.now_local(-2)},
-        }
-        for i, p in enumerate(self.outbound(c.WB_REVIEW)):
-            if p not in reviews:
-                self.edit_and_upload(p, fix, f"review_fix_{i}.xlsx")
-        self.run_job("phi_decision_ingestion")
-        self.run_job("phi_classification_application")
         open_items = int(self.sql.scalar(
             f"SELECT count(*) FROM {self.t(c.T_ITEM)} WHERE status NOT IN ({', '.join(lit(s) for s in c.TERMINAL_STATUSES)})"))
         check("all items terminal", open_items == 0, str(open_items))
@@ -431,12 +474,10 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         check("both batches CLOSED", closed == 2, str(closed))
         check("BATCH_CLOSED events", len(self.events(c.EV_BATCH_CLOSED)) == 2)
 
-        print("== 9. Same workbook uploaded twice is processed once")
-        before = len(self.events(c.EV_WORKBOOK_INGESTED))
-        data = self.w.files.download(uploaded[reviews[0]]).contents.read()
-        self.w.files.upload(f"{self.vol}/inbound/renamed_copy.xlsx", io.BytesIO(data), overwrite=False)
+        print("== 9. Rerunning ingestion processes nothing twice")
+        before = len(self.events(c.EV_SUBMISSION_PROCESSED))
         self.run_job("phi_decision_ingestion")
-        check("duplicate content skipped", len(self.events(c.EV_WORKBOOK_INGESTED)) == before)
+        check("no set processed twice", len(self.events(c.EV_SUBMISSION_PROCESSED)) == before)
 
         print("== 10. Metadata changes reopen items; removed columns close")
         self.q(f"ALTER TABLE {fqn(self.cat, cl, 'patient_encounter')} ALTER COLUMN source_system_code COMMENT 'Changed purpose'")
@@ -452,52 +493,40 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
         check("removed column -> CLOSED_NO_ACTION", self.item(fi, "temp_drop", "x")["status"] == c.CLOSED_NO_ACTION)
 
         print("== 10b. Re-decide reopened columns: new attestation and PHI tag both supersede the old attestation")
-        ssc = self.item(cl, "patient_encounter", "source_system_code", True)
-        nts = self.item(cl, "patient_encounter", "notes", True)
-        assign = [p for p in self.outbound(c.WB_ASSIGNMENT) if ssc["review_batch_id"] in p][-1]
-        self.edit_and_upload(assign, {ssc["review_item_id"]: {"assigned_steward": self.me},
-                                      nts["review_item_id"]: {"assigned_steward": self.me}}, "assign_reopened.xlsx")
-        self.run_job("phi_decision_ingestion")
-        rev = [p for p in self.outbound(c.WB_REVIEW) if ssc["review_batch_id"] in p][-1]
-        self.edit_and_upload(rev, {
-            ssc["review_item_id"]: {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": self.mapping["class.name"],
-                                    "reviewed_at": self.now_local()},
-            nts["review_item_id"]: {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Still system-generated",
-                                    "reviewed_at": self.now_local()}}, "review_reopened.xlsx")
+        q = self.queue()
+        status, body = self.submit("REVIEW", {
+            (cl, "patient_encounter", "source_system_code"): {"decision": c.CORRECT_CLASSIFICATION,
+                                                              "corrected_tag_value": self.mapping["class.name"]},
+            (cl, "patient_encounter", "notes"): {"decision": c.CONFIRM_NOT_PHI, "steward_comment": "Still system-generated"},
+            (cl, "patient_encounter", "ssn"): {"decision": c.APPROVE_SUGGESTION},
+        }, q)
+        check("App accepts decisions on reopened items", status == 200, str(body)[:300])
         self.run_job("phi_decision_ingestion")
         self.run_job("phi_classification_application")
 
-        def active_atts(col):
+        def atts(col, active):
+            cond = "IS NULL" if active else "IS NOT NULL"
             return int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ATTESTATION)} WHERE table_name = 'patient_encounter' "
-                                       f"AND column_name = {lit(col)} AND superseded_at IS NULL"))
+                                       f"AND column_name = {lit(col)} AND superseded_at {cond}"))
 
-        def superseded_atts(col):
-            return int(self.sql.scalar(f"SELECT count(*) FROM {self.t(c.T_ATTESTATION)} WHERE table_name = 'patient_encounter' "
-                                       f"AND column_name = {lit(col)} AND superseded_at IS NOT NULL"))
-
-        check("re-attestation leaves exactly one active attestation", active_atts("notes") == 1 and superseded_atts("notes") == 1)
+        check("re-attestation leaves exactly one active attestation", atts("notes", True) == 1 and atts("notes", False) == 1)
         check("verified PHI tag supersedes the non-PHI attestation",
-              active_atts("source_system_code") == 0 and superseded_atts("source_system_code") == 1
+              atts("source_system_code", True) == 0 and atts("source_system_code", False) == 1
               and self.tag_value(cl, "patient_encounter", "source_system_code") == self.mapping["class.name"])
 
-        print("== 11. Correction request and tag removal on a verified PHI column")
+        print("== 11. Correction requested in the App, then tag removal on a verified PHI column")
         col = f"{self.cat}.{cl}.patient_encounter.mrn"
-        self.run_job("phi_classification_scan", {**self.scan_params, "correction_column": col, "correction_reason": "E2E correction test",
-                                                 "correction_requested_by": self.me})
+        status, body = self.app("POST", "/api/review/corrections", {"column": col, "reason": "E2E correction test"})
+        check("App starts the correction scan", status == 200 and bool(body.get("scanRunId")), str(body)[:300])
+        self.wait_run(int(body["scanRunId"]))
         corr = self.item(cl, "patient_encounter", "mrn", True)
         check("CORRECTION_REQUESTED opened with current tag pre-filled",
               corr and corr["issue_type"] == c.CORRECTION_REQUESTED and corr["suggested_tag_value"] == self.mapping["class.medical_record_number"])
-        self.run_job("phi_classification_scan", {**self.scan_params, "correction_column": f"{self.cat}.{cl}.patient_encounter.ssn",
-                                                 "correction_reason": "already open", "correction_requested_by": self.me})
-        check("no second item when one is open", int(self.sql.scalar(
-            f"SELECT count(*) FROM {self.t(c.T_ITEM)} WHERE column_name = 'ssn' AND status NOT IN ('TAG_VERIFIED','ATTESTED_NOT_PHI','CLOSED_NO_ACTION')")) == 1)
-        # Assign and decide the correction: confirm not PHI on a tagged column -> removal.
-        assign = [p for p in self.outbound(c.WB_ASSIGNMENT) if corr["review_batch_id"] in p][-1]
-        self.edit_and_upload(assign, {corr["review_item_id"]: {"assigned_steward": self.me}}, "assign_corr.xlsx")
-        self.run_job("phi_decision_ingestion")
-        rev = [p for p in self.outbound(c.WB_REVIEW) if corr["review_batch_id"] in p][-1]
-        self.edit_and_upload(rev, {corr["review_item_id"]: {"decision": c.CONFIRM_NOT_PHI,
-                                   "steward_comment": "Correction: surrogate key only", "reviewed_at": self.now_local(-1)}}, "review_corr.xlsx")
+        check("CORRECTION_REQUESTED event records the requester",
+              any(e["business_actor"] == self.me for e in self.events(c.EV_CORRECTION_REQUESTED)))
+        status, body = self.submit("REVIEW", {(cl, "patient_encounter", "mrn"): {
+            "decision": c.CONFIRM_NOT_PHI, "steward_comment": "Correction: surrogate key only"}}, self.queue())
+        check("App accepts the corrected decision", status == 200, str(body)[:300])
         self.run_job("phi_decision_ingestion")
         self.run_job("phi_classification_application")
         check("correction removed tag and attested", self.item(cl, "patient_encounter", "mrn")["status"] == c.ATTESTED_NOT_PHI
@@ -506,15 +535,66 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{stewards},{gov},true,2026-01-
                        f"AND issue_type = 'MISSING_CLASSIFICATION'")
         check("original item unchanged as evidence", prior and prior[0]["status"] == c.TAG_VERIFIED)
 
-        print("== 12. Audit columns")
+        print("== 12. Data Governance maintains reference data in the App")
+        status, body = self.app("PUT", "/api/review/scopes/SCOPE-FINANCE-DEV", {
+            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_group": FINANCE_STEWARD,
+            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
+        check("scope edit saved", status == 200, str(body)[:300])
+        ev = self.q(f"SELECT CAST(event_details AS STRING) AS d, business_actor FROM {self.t(c.T_EVENT)} "
+                    f"WHERE event_type = 'SCOPE_REGISTRY_UPDATED'")
+        check("scope edit recorded with before/after and actor", bool(ev) and '"before"' in ev[0]["d"] and "STANDARD" in ev[0]["d"]
+              and ev[0]["business_actor"] == self.me, str(ev)[:300])
+        status, _ = self.app("PUT", "/api/review/scopes/SCOPE-OTHER-DEV", {
+            "catalog_name": "other_catalog", "schema_name": "*", "risk_tier": "HIGH", "steward_group": FINANCE_STEWARD,
+            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01"})
+        check("scope outside this environment refused", status == 422)
+        status, body = self.app("PUT", "/api/review/mappings/class.e2e_test", {
+            "phi_tag_value": self.mapping["class.name"], "is_active": False, "notes": "E2E"})
+        check("mapping edit saved and audited", status == 200 and len(self.events(c.EV_SUGGESTION_MAPPING_UPDATED)) == 1, str(body)[:300])
+        status, _ = self.app("PUT", "/api/review/mappings/class.e2e_test", {"phi_tag_value": "not_a_value", "is_active": True})
+        check("mapping to a value outside the policy refused", status == 422)
+
+        print("== 12b. A steward-group change reroutes open items; a recorded decision freezes the suggestion")
+        dc = fqn(self.cat, self.support, "dc_results")
+        self.q(f"CREATE OR REPLACE TABLE {fqn(self.cat, fi, 'reroute')} (c1 STRING COMMENT 'one', c2 STRING COMMENT 'two')")
+        for col in ("c1", "c2"):
+            self.q(f"""INSERT INTO {dc} VALUES (current_timestamp(), current_timestamp(), 'x', 'y', {lit(self.cat)}, {lit(fi)},
+                'reroute', {lit(col)}, 'string', 'class.name', array(), 'HIGH', 0.9)""")
+        self.run_job("phi_classification_scan", self.scan_params)
+        c1, c2 = self.item(fi, "reroute", "c1", True), self.item(fi, "reroute", "c2", True)
+        check("new items routed to the scope's current steward group",
+              c1["assigned_steward"] == FINANCE_STEWARD and c1["suggested_tag_value"] == self.mapping["class.name"])
+        new_steward = "finance.steward2@example.com"
+        status, body = self.app("PUT", "/api/review/scopes/SCOPE-FINANCE-DEV", {
+            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_group": new_steward,
+            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
+        check("steward group changed in the App", status == 200, str(body)[:300])
+        # Record a (rejected) decision on c1 only, then change the Data Classification result for both columns.
+        self.inject(c.SUB_REVIEW, c1, c.CORRECT_CLASSIFICATION, by=self.me, acting_as="GOVERNANCE_OWNER", via=self.me,
+                    corrected="not_a_value")
+        self.run_job("phi_decision_ingestion")
+        check("c1 has a recorded decision", self.item(fi, "reroute", "c1", True)["status"] == c.VALIDATION_FAILED)
+        for col in ("c1", "c2"):
+            self.q(f"""INSERT INTO {dc} VALUES (current_timestamp(), current_timestamp(), 'x', 'y', {lit(self.cat)}, {lit(fi)},
+                'reroute', {lit(col)}, 'string', 'class.email_address', array(), 'HIGH', 0.9)""")
+        self.run_job("phi_classification_scan", self.scan_params)
+        c1, c2 = self.item(fi, "reroute", "c1", True), self.item(fi, "reroute", "c2", True)
+        check("open items rerouted to the new steward group",
+              c1["assigned_steward"] == new_steward and c2["assigned_steward"] == new_steward, f"{c1['assigned_steward']}")
+        check("suggestion frozen once a decision is recorded", c1["suggested_tag_value"] == self.mapping["class.name"],
+              str(c1["suggested_tag_value"]))
+        check("suggestion refreshes while no decision is recorded",
+              c2["suggested_tag_value"] == self.mapping["class.email_address"], str(c2["suggested_tag_value"]))
+
+        print("== 13. Audit columns and writer constraints")
         bad = self.sql.scalar(
             f"SELECT count(*) FROM {self.t(c.T_ITEM)} WHERE audit_created_process NOT LIKE 'dev_phi_%' OR audit_updated_run_id IS NULL")
         check("item audit columns populated by jobs", int(bad) == 0)
         try:
-            self.q(f"UPDATE {self.t(c.T_ITEM)} SET audit_updated_process = 'MANUAL' WHERE true")
-            check("manual process rejected on job-only table", False, "update succeeded")
+            self.q(f"UPDATE {self.t(c.T_ITEM)} SET audit_updated_process = {lit(c.app_process_name('dev'))} WHERE true")
+            check("App process rejected on job-only table", False, "update succeeded")
         except RuntimeError as exc:
-            check("manual process rejected on job-only table", "CHECK" in str(exc).upper(), str(exc)[:200])
+            check("App process rejected on job-only table", "CHECK" in str(exc).upper(), str(exc)[:200])
 
 
 def main() -> None:

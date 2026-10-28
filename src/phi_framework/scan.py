@@ -13,7 +13,7 @@ from __future__ import annotations
 from phi_framework import constants as c
 from phi_framework.batches import close_completed_batches, due_at_utc
 from phi_framework.config import Settings
-from phi_framework.directory import GroupDirectory, TagPolicy
+from phi_framework.directory import TagPolicy
 from phi_framework.keys import fingerprint_sql, make_key, make_key_sql
 from phi_framework.runtime import Runtime, log, utcnow
 from phi_framework.sqlutil import in_list, lit, qi
@@ -68,10 +68,10 @@ class Scan:
             raise ValueError("correction_column must be catalog.schema.table.column")
         if not self.s.correction_reason:
             raise ValueError("correction_reason is required for a correction request")
-        if not GroupDirectory(self.rt.w).is_member(self.s.correction_requested_by, self.s.governance_group):
-            raise PermissionError(
-                f"correction_requested_by {self.s.correction_requested_by!r} is not a member of {self.s.governance_group}"
-            )
+        # The review App verifies the requester is in Data Governance (from their own groups) before it
+        # starts this run; only Data Governance, Data Platform, and the App can run the scan job.
+        if "@" not in self.s.correction_requested_by:
+            raise ValueError("correction_requested_by must be the requesting user's email")
         self.correction = tuple(parts)  # type: ignore[assignment]
         log.info("Correction request for %s by %s", ".".join(parts), self.s.correction_requested_by)
 
@@ -365,12 +365,14 @@ class Scan:
     # ------------------------------------------------------------------
     def _update_open_items(self) -> None:
         stage = f"{self.s.schema_fqn}.{qi(STAGE_TABLE)}"
-        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value"]
+        # assigned_steward follows the scope registry, so a changed steward_group reroutes open items.
+        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value", "assigned_steward"]
         frozen = ["issue_type", "suggested_tag_value", "suggestion_reason"]
-        # Once an item has gone to a steward (assigned) or is a correction, its issue and suggestion are
-        # frozen: a steward's APPROVE_SUGGESTION must approve the value they were shown.
+        # Issue and suggestion refresh only while an item awaits its first decision and is not a
+        # correction. The App records the suggestion each reviewer saw, and ingestion rejects an
+        # APPROVE_SUGGESTION whose suggestion has since changed.
         mutable = (
-            f"t.status = {lit(c.PENDING_STEWARD_REVIEW)} AND t.assigned_steward IS NULL "
+            f"t.status = {lit(c.PENDING_STEWARD_REVIEW)} AND t.decision IS NULL "
             f"AND t.issue_type <> {lit(c.CORRECTION_REQUESTED)}"
         )
         changed = " OR ".join(
@@ -381,7 +383,8 @@ class Scan:
         )
         self.rt.sql(
             f"""MERGE INTO {self.rt.t(c.T_ITEM)} t
-            USING (SELECT * FROM {stage} WHERE issue_type IS NOT NULL AND open_item_id IS NOT NULL) s
+            USING (SELECT *, steward_group AS assigned_steward FROM {stage}
+                   WHERE issue_type IS NOT NULL AND open_item_id IS NOT NULL) s
             ON t.review_item_id = s.open_item_id
             WHEN MATCHED AND t.status IN ({in_list(c.NON_TERMINAL_STATUSES)}) AND ({changed})
               THEN UPDATE SET {sets}, {self.rt.audit_update_set()}"""
@@ -410,10 +413,11 @@ class Scan:
             ON t.review_item_id = s.review_item_id
             WHEN NOT MATCHED THEN INSERT (review_item_id, review_batch_id, catalog_name, schema_name, table_name,
                 table_type, column_name, full_data_type, column_comment, column_fingerprint, issue_type,
-                current_tag_value, suggested_tag_value, suggestion_reason, status, {', '.join(audit)})
+                current_tag_value, suggested_tag_value, suggestion_reason, assigned_steward, status, {', '.join(audit)})
             VALUES (s.review_item_id, s.new_batch_id, s.catalog_name, s.schema_name, s.table_name, s.table_type,
                 s.column_name, s.full_data_type, s.column_comment, s.column_fingerprint, s.issue_type,
-                s.current_tag_value, s.suggested_tag_value, s.suggestion_reason, {lit(c.PENDING_STEWARD_REVIEW)},
+                s.current_tag_value, s.suggested_tag_value, s.suggestion_reason, s.steward_group,
+                {lit(c.PENDING_STEWARD_REVIEW)},
                 {', '.join(audit.values())})"""
         )
         proc = lit(self.s.process_name)
