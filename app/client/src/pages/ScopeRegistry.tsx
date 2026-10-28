@@ -38,15 +38,15 @@ import {
   Textarea,
 } from '@databricks/appkit-ui/react';
 import { Plus } from 'lucide-react';
-import { api, describeError, fmtDate, type ScopeRow } from '../lib/api';
+import { api, describeError, fmtDate, parseEmails, splitEmails, type ScopeRow } from '../lib/api';
 
 interface Form {
   scope_id: string;
   catalog_name: string;
   schema_name: string;
   risk_tier: string;
-  steward_group: string;
-  governance_owner: string;
+  steward_emails: string;
+  governance_owner_emails: string;
   scan_enabled: boolean;
   effective_date: string;
   expiration_date: string;
@@ -57,8 +57,8 @@ const EMPTY: Form = {
   catalog_name: '',
   schema_name: '*',
   risk_tier: 'STANDARD',
-  steward_group: '',
-  governance_owner: '',
+  steward_emails: '',
+  governance_owner_emails: '',
   scan_enabled: true,
   effective_date: new Date().toISOString().slice(0, 10),
   expiration_date: '',
@@ -70,8 +70,8 @@ function toForm(r: ScopeRow): Form {
     catalog_name: r.catalog_name,
     schema_name: r.schema_name,
     risk_tier: r.risk_tier,
-    steward_group: r.steward_group,
-    governance_owner: r.governance_owner,
+    steward_emails: parseEmails(r.steward_emails).join('\n'),
+    governance_owner_emails: parseEmails(r.governance_owner_emails).join('\n'),
     scan_enabled: r.scan_enabled === 'true',
     effective_date: r.effective_date,
     expiration_date: r.expiration_date ?? '',
@@ -110,8 +110,13 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
     setSaving(true);
     setFormError(null);
     try {
-      const { scope_id, ...rest } = form;
-      await api.saveScope(scope_id, { ...rest, expiration_date: rest.expiration_date || null });
+      const { scope_id, steward_emails, governance_owner_emails, ...rest } = form;
+      await api.saveScope(scope_id, {
+        ...rest,
+        steward_emails: splitEmails(steward_emails),
+        governance_owner_emails: splitEmails(governance_owner_emails),
+        expiration_date: rest.expiration_date || null,
+      });
       setForm(null);
       await load();
     } catch (err) {
@@ -147,8 +152,8 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
       )}
       <div className="flex items-center gap-2">
         <p className="text-sm text-muted-foreground">
-          Each scope routes review items to its steward group (one email or one group) and copies its governance owner.
-          Every change is recorded in the audit trail.
+          Each scope routes review items to its steward emails and copies its governance owner emails. Every change is
+          recorded in the audit trail.
         </p>
         {canEdit && (
           <Button
@@ -180,8 +185,8 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
                   <TableHead>Scope</TableHead>
                   <TableHead>Catalog.schema</TableHead>
                   <TableHead>Risk tier</TableHead>
-                  <TableHead>Steward group</TableHead>
-                  <TableHead>Governance owner</TableHead>
+                  <TableHead>Steward emails</TableHead>
+                  <TableHead>Governance owner emails</TableHead>
                   <TableHead>Active</TableHead>
                   <TableHead>Last changed</TableHead>
                   {canEdit && <TableHead />}
@@ -197,8 +202,8 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
                     <TableCell>
                       <Badge variant={r.risk_tier === 'HIGH' ? 'destructive' : 'secondary'}>{r.risk_tier}</Badge>
                     </TableCell>
-                    <TableCell>{r.steward_group}</TableCell>
-                    <TableCell>{r.governance_owner}</TableCell>
+                    <TableCell className="text-xs">{parseEmails(r.steward_emails).join(', ')}</TableCell>
+                    <TableCell className="text-xs">{parseEmails(r.governance_owner_emails).join(', ')}</TableCell>
                     <TableCell>
                       {r.scan_enabled === 'true' ? 'Scanned' : 'Paused'}
                       <div className="text-xs text-muted-foreground">
@@ -304,19 +309,19 @@ export function ScopeRegistry({ canEdit }: { canEdit: boolean }) {
                 </div>
               </div>
               <div className="space-y-1">
-                <Label htmlFor="scope-stewards">Steward group (one email or one group name)</Label>
-                <Input
+                <Label htmlFor="scope-stewards">Steward emails (one per line)</Label>
+                <Textarea
                   id="scope-stewards"
-                  value={form.steward_group}
-                  onChange={(e) => setForm({ ...form, steward_group: e.target.value })}
+                  value={form.steward_emails}
+                  onChange={(e) => setForm({ ...form, steward_emails: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
-                <Label htmlFor="scope-owner">Governance owner (one email or one group name)</Label>
-                <Input
+                <Label htmlFor="scope-owner">Governance owner emails (one per line)</Label>
+                <Textarea
                   id="scope-owner"
-                  value={form.governance_owner}
-                  onChange={(e) => setForm({ ...form, governance_owner: e.target.value })}
+                  value={form.governance_owner_emails}
+                  onChange={(e) => setForm({ ...form, governance_owner_emails: e.target.value })}
                 />
               </div>
               <div className="grid grid-cols-3 gap-3">

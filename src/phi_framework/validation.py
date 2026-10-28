@@ -23,8 +23,8 @@ class ItemContext:
     status: str
     suggested_tag_value: str | None
     batch_created_at: datetime  # naive UTC
-    steward_group: str  # one user email or one group name
-    governance_owner: str  # one user email or one group name
+    steward_emails: tuple[str, ...]  # lower-case reviewer emails from the scope registry
+    governance_owner_emails: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class Submission:
     review_batch_id: str
     suggested_tag_value_seen: str | None = None
     acting_as: str | None = None  # role the App authorized the reviewer in
-    authorized_via: str | None = None  # scope value (or Data Governance group) that authorized the role
+    authorized_via: str | None = None  # reviewer email, or the Data Governance group for DATA_GOVERNANCE
 
 
 @dataclass(frozen=True)
@@ -70,11 +70,12 @@ def validate_decision(
 ) -> Outcome:
     """Validate one submission.
 
-    Reviewer authorization trusts the review App, which checked the signed-in user's own group
-    memberships before writing the submission (only the App may write submissions). Ingestion
-    confirms the recorded role is valid for the decision and that the value which authorized it is
-    still the scope's current steward group, governance owner, or the Data Governance group, so a
-    registry change after submission invalidates it. Group member lists are never read here.
+    Stewards and governance owners are verified directly: the reviewer's email must be on the scope's
+    current steward_emails or governance_owner_emails, so a registry change after submission
+    invalidates the decision. Data Governance is a workspace group; for that role ingestion trusts the
+    review App, which checked the signed-in user's own groups before writing the submission (only the
+    App may write submissions), and confirms the recorded group is still the configured one.
+    Group member lists are never read.
     """
     errors: list[str] = []
     decision = _clean(sub.decision)
@@ -95,23 +96,25 @@ def validate_decision(
     acting_as = _clean(sub.acting_as)
     acting_as = acting_as.upper() if acting_as else None
     via = (_clean(sub.authorized_via) or "").lower()
-    expected = {
-        ACTING_STEWARD: item.steward_group,
-        ACTING_GOVERNANCE_OWNER: item.governance_owner,
-        ACTING_DATA_GOVERNANCE: governance_group,
+    stewards = {e.strip().lower() for e in item.steward_emails}
+    owners = {e.strip().lower() for e in item.governance_owner_emails}
+    authorized = {
+        ACTING_STEWARD: reviewer in stewards,
+        ACTING_GOVERNANCE_OWNER: reviewer in owners,
+        ACTING_DATA_GOVERNANCE: via == governance_group.strip().lower(),
     }
     allowed_roles = (
         [ACTING_DATA_GOVERNANCE, ACTING_GOVERNANCE_OWNER] if privacy_outcome else [ACTING_STEWARD, ACTING_GOVERNANCE_OWNER]
     )
     if not reviewer:
         errors.append("reviewed_by is required")
-    elif acting_as not in allowed_roles or via != (_clean(expected.get(acting_as)) or "").lower():
+    elif acting_as not in allowed_roles or not authorized.get(acting_as):
         if privacy_outcome:
             errors.append(
                 f"{reviewer} must be in {governance_group} or be the scope's governance owner to record a Privacy outcome"
             )
         else:
-            errors.append(f"{reviewer} is not a reviewer for this scope (steward group or governance owner)")
+            errors.append(f"{reviewer} is not a reviewer for this scope (steward or governance owner emails)")
         acting_as = None
 
     # Decision time (captured by the App server)

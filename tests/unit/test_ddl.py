@@ -32,6 +32,14 @@ def test_submission_contract_has_authenticated_reviewer_and_no_file_columns():
     assert sub.checks["valid_submission_type"] == "submission_type IN ('REVIEW', 'PRIVACY')"
 
 
+def test_scope_reviewers_are_email_lists():
+    scope = next(t for t in table_defs("dev", "dev_") if t.name == c.T_SCOPE)
+    cols = {col.name: col for col in scope.columns}
+    assert cols["steward_emails"].type == "ARRAY<STRING>" and cols["governance_owner_emails"].not_null
+    assert "steward_group" not in cols and "governance_owner" not in cols
+    assert "forall(steward_emails" in scope.checks["valid_steward_emails"]
+
+
 def test_environment_guardrail_constraint():
     scope = next(t for t in table_defs("qa", "qa_hc_") if t.name == c.T_SCOPE)
     assert scope.checks["catalog_matches_environment"] == "environment = 'qa' AND startswith(catalog_name, 'qa_hc_')"

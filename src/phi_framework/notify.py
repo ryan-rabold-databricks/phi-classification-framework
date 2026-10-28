@@ -3,14 +3,14 @@
 Runs as the last task of the scan job. For every OPEN batch with items awaiting review
 and no REVIEW_REQUEST_SENT event yet, it sends one email:
 
-* To: every user the scope's ``steward_group`` resolves to (one email, or all members of a group).
-* Cc: every user the scope's ``governance_owner`` resolves to, except those already in To.
+* To: the scope's ``steward_emails``.
+* Cc: the scope's ``governance_owner_emails``, except those already in To.
 * Body: counts, scope, due date, and a link to the batch in the review App. No column data.
 
 Each send records REVIEW_REQUEST_SENT. A send failure records REVIEW_REQUEST_FAILED (kind SEND), is
-retried by the next scan, and fails the task after every batch has been attempted. A batch whose
-reviewer values resolve to no users records REVIEW_REQUEST_FAILED (kind RECIPIENTS) once and is not
-retried; values that cannot be resolved are listed on the event. An empty ``smtp_host`` disables sending.
+retried by the next scan, and fails the task after every batch has been attempted. A batch with no
+recipients records REVIEW_REQUEST_FAILED (kind RECIPIENTS) once and is not retried. Recipients come
+straight from the scope registry, so no group membership is read. An empty ``smtp_host`` disables sending.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from email.message import EmailMessage
 
 from phi_framework import constants as c
 from phi_framework.config import Settings
-from phi_framework.directory import GroupDirectory
 from phi_framework.runtime import Runtime, log
 from phi_framework.sqlutil import in_list, lit
 
@@ -44,6 +43,10 @@ class ReviewRequest:
     link: str
 
 
+def _emails(values) -> set[str]:
+    return {str(v).strip().lower() for v in (values or []) if v and "@" in str(v)}
+
+
 def render(req: ReviewRequest) -> tuple[str, str]:
     """Subject and plain-text body for a review request."""
     scope = f"{req.catalog_name}.{req.schema_name}"
@@ -63,10 +66,9 @@ def render(req: ReviewRequest) -> tuple[str, str]:
 
 
 class Notifier:
-    def __init__(self, rt: Runtime, groups: GroupDirectory | None = None, smtp_factory=None):
+    def __init__(self, rt: Runtime, smtp_factory=None):
         self.rt = rt
         self.s: Settings = rt.s
-        self.groups = groups or GroupDirectory(rt.w)
         self._smtp_factory = smtp_factory or self._smtp
 
     # ------------------------------------------------------------------
@@ -81,11 +83,9 @@ class Notifier:
         base_url = self._app_url()
         send_failures = 0
         for b in pending:
-            # Each batch is handled on its own: an unresolvable reviewer value (for example a group whose
-            # member list this identity cannot read) never stops the other batches.
-            to_set, unresolved = self._resolve(b["steward_group"])
-            cc_set, unresolved_cc = self._resolve(b["governance_owner"])
-            unresolved += unresolved_cc
+            # Each batch is handled on its own, so one failure never stops the other batches.
+            to_set = _emails(b["steward_emails"])
+            cc_set = _emails(b["governance_owner_emails"])
             req = ReviewRequest(
                 review_batch_id=b["review_batch_id"],
                 scope_id=b["scope_id"],
@@ -97,14 +97,14 @@ class Notifier:
                 cc=tuple(sorted(cc_set - to_set)),
                 link=f"{base_url}/?batch={b['review_batch_id']}" if base_url else "(review app URL not configured)",
             )
-            details = {"to": list(req.to), "cc": list(req.cc), "item_count": req.item_count, "unresolved": unresolved}
+            details = {"to": list(req.to), "cc": list(req.cc), "item_count": req.item_count}
             if not req.to and not req.cc:
                 # A configuration problem, not a transient one: record it once and do not retry the batch
                 # or fail the scan every week. Reviewers still see the batch in the App.
-                log.error("Review request for %s has no resolvable recipients: %s", req.review_batch_id, unresolved)
+                log.error("Review request for %s has no recipients", req.review_batch_id)
                 self.rt.event(c.EV_REVIEW_REQUEST_FAILED, req.review_batch_id,
                               details={**details, "kind": FAIL_RECIPIENTS,
-                                       "error": "steward_group and governance_owner resolve to no users"})
+                                       "error": "steward_emails and governance_owner_emails are empty"})
             else:
                 try:
                     self._send(req)
@@ -120,20 +120,11 @@ class Notifier:
         if send_failures:
             raise RuntimeError(f"{send_failures} review request(s) could not be sent; see REVIEW_REQUEST_FAILED events")
 
-    def _resolve(self, value: str | None) -> tuple[set[str], list[str]]:
-        """Users a reviewer value stands for, and the value itself when it could not be resolved."""
-        try:
-            users = set(self.groups.principals(value))
-        except Exception as exc:  # for example a 403 reading a group's members
-            log.warning("Could not resolve reviewer value %s: %s", value, exc)
-            return set(), [f"{value}: {type(exc).__name__}"]
-        return users, ([] if users or not value else [f"{value}: no users"])
-
     # ------------------------------------------------------------------
     def _pending_batches(self) -> list[dict]:
         return self.rt.rows(
             f"""SELECT b.review_batch_id, b.scope_id, b.due_at, s.catalog_name, s.schema_name,
-                   s.steward_group, s.governance_owner, count(i.review_item_id) AS item_count
+                   s.steward_emails, s.governance_owner_emails, count(i.review_item_id) AS item_count
             FROM {self.rt.t(c.T_BATCH)} b
             JOIN {self.rt.t(c.T_SCOPE)} s ON s.scope_id = b.scope_id
             JOIN {self.rt.t(c.T_ITEM)} i ON i.review_batch_id = b.review_batch_id

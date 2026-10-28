@@ -41,8 +41,8 @@ As the Data Platform team, we need the dev workspace, governed tag, groups, Data
 - Give the engineer `CREATE SCHEMA` on `<dev governance catalog>`, plus access to serverless jobs, Databricks Apps, and a serverless SQL warehouse `<warehouse_id>` in `<dev workspace>`.
 - Confirm the `phi_classification` tag policy exists with Data Governance's approved values. Grant the engineer `ASSIGN` on it.
 - Enable Data Classification on the dev pilot catalog `<dev pilot catalog>`. Grant `SELECT` on `system.data_classification.results` to the engineer (and later the framework service principal) **only**.
-- Create or confirm the groups: Data Governance `<governance_group>`, Data Platform `<platform_group>`, the pilot steward group `<steward_group>` (if the scope uses a group rather than one email), and the App users group `<review_app_users_group>` containing every steward and governance owner.
-- Create a dev-only test steward group for the end-to-end test (for example `dev_phi_test_stewards`) with the engineer as a member, and add the engineer to `<governance_group>` and `<review_app_users_group>` in dev.
+- Create or confirm the groups: Data Governance `<governance_group>`, Data Platform `<platform_group>`, and the App users group `<review_app_users_group>` containing every steward and governance owner. Scope reviewers are email lists, so no steward group is needed.
+- For the end-to-end test, add the engineer to `<governance_group>` and `<review_app_users_group>` in dev. The test's synthetic scopes list the engineer's email as a steward and as a governance owner.
 - Provide an SMTP relay for review-request emails: host, port, sender address, and (if the relay needs a login) a secret scope `<smtp_secret_scope>` with keys `smtp_username` and `smtp_password`.
 - Confirm the dev workspace has a READ/WRITE binding to `<dev governance catalog>` and to the pilot catalog.
 
@@ -63,7 +63,7 @@ As Data Governance, I need to choose the pilot scope, who reviews it, and the ma
 
 **Tasks**
 - Choose the pilot catalog/schema and its risk tier (HIGH or STANDARD).
-- Choose the reviewers. `steward_group` is one user email or one group name; every user it names is emailed and can review. `governance_owner` is one user email or one group name; it is copied on the email and may review in place of a steward.
+- Choose the reviewers: `steward_emails` (one or more emails; each is emailed and can review) and `governance_owner_emails` (one or more emails; copied on the email, may review in place of a steward, and may record Privacy outcomes). The lists are not synced from the identity provider, so agree who updates them when stewards join or leave; every change is audited.
 - Review `reference_data/suggestion_mapping.csv` in the repo. Resolve the rows marked "Review":
   - `class.driver_license` / `class.us_driver_license` → `certificate_license`?
   - `class.passport` / `class.us_passport` → which value?
@@ -72,7 +72,7 @@ As Data Governance, I need to choose the pilot scope, who reviews it, and the ma
 - Note: the original spreadsheet has a trailing space in `class.gender ` that would never match a detection; the CSV fixes it.
 
 **Acceptance criteria**
-- [ ] Scope row values agreed: `scope_id` (for example `SCOPE-<DOMAIN>-DEV`), catalog, schema or `*`, risk tier, `steward_group`, `governance_owner`, effective date.
+- [ ] Scope row values agreed: `scope_id` (for example `SCOPE-<DOMAIN>-DEV`), catalog, schema or `*`, risk tier, `steward_emails`, `governance_owner_emails`, effective date.
 - [ ] Mapping CSV approved, with every value in the `phi_classification` tag policy.
 - [ ] Reviewer list agreed and every reviewer added to `<review_app_users_group>`.
 
@@ -102,7 +102,7 @@ Code to start from: `databricks.yml`, `resources/`, `src/phi_framework/ddl.py`, 
 - [ ] `<dev governance catalog>.data_governance` contains all 8 tables, their CHECK/PK/FK constraints and comments, and the `make_key` function.
 - [ ] Jobs show the schedule and triggers **paused** in dev.
 - [ ] The scan opens one batch per scope with new findings, and one item per actionable column. Issue types follow the documented order.
-- [ ] Every item's `assigned_steward` is the scope's `steward_group`. Changing `steward_group` and rescanning updates it on open items.
+- [ ] Every item's `assigned_stewards` is the scope's `steward_emails`. Changing `steward_emails` and rescanning updates it on open items.
 - [ ] Suggestions come from your real Data Classification results: HIGH confidence, latest detection only, and only when every detection maps to the same allowed value. The `samples` column never appears in any governance table.
 - [ ] Pipeline-internal tables (`__materialization_*`, `event_log_<uuid>`) are not scanned. Verify against your real pipelines.
 - [ ] Rerunning the scan with unchanged metadata opens no new items or batches.
@@ -124,11 +124,11 @@ Code to start from: `app/` (AppKit, TypeScript/React), `resources/review_app.yml
 1. Confirm the App deployed by PHI-2 is running, and that its service principal received the declared grants (`SELECT` on review tables, `MODIFY` on submission/scope/mapping/event tables, `EXECUTE` on `make_key`, `CAN_USE` on the warehouse, `CAN_MANAGE_RUN` on the scan job).
 2. Walk through the review queue with one pilot steward on real columns, then with the governance owner.
 3. Submit decisions, run `dev_phi_decision_ingestion` (dev triggers are paused), and walk through rejected items returning to the queue with the reason.
-4. Regression check: run `tests/integration/e2e_sandbox.py` against a throwaway governance schema (name starting with `phifw_`) with `--steward-group dev_phi_test_stewards` and `--mapping reference_data/suggestion_mapping.csv`. The test drives the deployed App over HTTPS as the signed-in user.
+4. Regression check: run `tests/integration/e2e_sandbox.py` against a throwaway governance schema (name starting with `phifw_`) with `--mapping reference_data/suggestion_mapping.csv`. The test drives the deployed App over HTTPS as the signed-in user.
 
 **Acceptance criteria**
-- [ ] The App shows the signed-in user's email and roles. A steward sees only the scopes their `steward_group` names; a governance owner sees the scopes they own; a user with no role sees no queue.
-- [ ] Group membership is read from the signed-in user's own token (SCIM `/Me` with the forwarded user token; default `iam.current-user:read` scope); nested groups count.
+- [ ] The App shows the signed-in user's email and roles. A steward sees only the scopes whose `steward_emails` include them; a governance owner sees the scopes whose `governance_owner_emails` include them; a user with no role sees no queue.
+- [ ] Data Governance membership is read from the signed-in user's own token (SCIM `/Me` with the forwarded user token; default `iam.current-user:read` scope); nested groups count. Steward and owner roles come from the scope's email lists.
 - [ ] Each row shows column metadata, issue type, current tag, suggestion and reason, due date, and any rejection reason. Selected rows can be bulk-approved.
 - [ ] The App refuses invalid decisions before writing anything, with a per-item reason:
   - `APPROVE_SUGGESTION` requires an allowed suggestion, unchanged since the reviewer opened the item.
@@ -138,7 +138,7 @@ Code to start from: `app/` (AppKit, TypeScript/React), `resources/review_app.yml
   - The reviewer must be a steward or the governance owner for the scope.
 - [ ] Submissions record the authenticated reviewer (`reviewed_by`), the server time (`reviewed_at`), and the suggestion seen, one submission set per batch.
 - [ ] Each submission records the role the App authorized (`acting_as`) and the scope value that authorized it (`authorized_via`).
-- [ ] Ingestion re-checks every decision rule and trusts the App's reviewer check, confirming `authorized_via` is still the scope's current reviewer value; a submission written directly to the table that breaks a rule or no longer matches is rejected (`VALIDATION_FAILED`). Ingestion never reads group member lists.
+- [ ] Ingestion re-checks every decision rule and verifies stewards and governance owners directly against the scope's current email lists; only for Data Governance does it trust the App's check (confirming the recorded group). A submission written directly to the table that breaks a rule or names a reviewer not on the lists is rejected (`VALIDATION_FAILED`). Nothing reads group member lists.
 - [ ] Valid decisions produce immutable plan rows (append-only) or attestations, with `expires_at` 3 months out for HIGH scopes and 6 months for STANDARD. `DECISION_RECEIVED` records `acting_as` (`STEWARD` or `GOVERNANCE_OWNER`).
 - [ ] Each submission set is processed exactly once (`SUBMISSION_PROCESSED`); rerunning ingestion changes nothing.
 - [ ] A submission that changes an already-accepted decision is ignored and reported (`CHANGE_IGNORED_ALREADY_RESOLVED`).
@@ -162,9 +162,9 @@ Code to start from: `src/phi_framework/notify.py`, the `notify_reviewers` task i
 3. Confirm the email text with Data Governance.
 
 **Acceptance criteria**
-- [ ] One email per new batch: To every user `steward_group` names (one email, or all members of the group); Cc every user `governance_owner` names who is not already in To.
+- [ ] One email per new batch: To the scope's `steward_emails`; Cc its `governance_owner_emails` that are not already in To. No group membership is read.
 - [ ] The email shows counts, scope, due date, and a link to the batch in the App, and never column names, comments, or data.
-- [ ] Each send records `REVIEW_REQUEST_SENT` with the recipients and any unresolvable reviewer values. A batch with no resolvable recipients records `REVIEW_REQUEST_FAILED` (kind `RECIPIENTS`) once without failing the scan; a send failure records kind `SEND`, fails the task after every batch is attempted, and is retried by the next scan.
+- [ ] Each send records `REVIEW_REQUEST_SENT` with the recipients. A batch with no recipients records `REVIEW_REQUEST_FAILED` (kind `RECIPIENTS`) once without failing the scan; a send failure records kind `SEND`, fails the task after every batch is attempted, and is retried by the next scan.
 - [ ] Rerunning the scan does not resend for a batch already emailed. The task has no retries.
 - [ ] With `smtp_host` empty, nothing is sent and the scan still succeeds.
 
@@ -207,7 +207,7 @@ As Data Governance, I can record Privacy's outcome in the App, request a correct
 Code to start from: the Privacy review tab and `/api/review/corrections` in `app/`, `scan.py` (correction parameters and issue order), and `ingest.py`.
 
 **Acceptance criteria**
-- [ ] Items in `NEEDS_PRIVACY_REVIEW` appear on the Privacy review tab with the steward's question. Only a member of `<governance_group>` or the scope's `governance_owner` can record the outcome. A rejected outcome keeps the item in Privacy review, with the reason shown, and a review-queue decision cannot close it.
+- [ ] Items in `NEEDS_PRIVACY_REVIEW` appear on the Privacy review tab with the steward's question. Only a member of `<governance_group>` or one of the scope's governance owners can record the outcome. A rejected outcome keeps the item in Privacy review, with the reason shown, and a review-queue decision cannot close it.
 - [ ] A correction requested on the Scope registry tab starts the scan, records `CORRECTION_REQUESTED` with the requester, and opens a `CORRECTION_REQUESTED` item in a new batch, pre-filled with the current tag. If the column already has an open item, nothing new is opened. Only `<governance_group>` members can request one.
 - [ ] Confirming not-PHI on a tagged column removes the tag and records an attestation. The original item and plan stay unchanged as evidence.
 - [ ] A changed column comment or type reopens the column as `STALE_PHI_REVIEW` or `STALE_NON_PHI_ATTESTATION`. A removed column's open item closes as `CLOSED_NO_ACTION`.
@@ -231,7 +231,7 @@ Code to start from: the Scope registry and Suggestion mapping tabs and the `/api
 - [ ] A scope's catalog must start with `<dev catalog prefix>`; the expiration date cannot precede the effective date; scopes are paused with `scan_enabled` or an expiration date, never deleted.
 - [ ] A mapping value must be in the `phi_classification` tag policy; mappings are deactivated, never deleted.
 - [ ] Every edit records `SCOPE_REGISTRY_UPDATED` or `SUGGESTION_MAPPING_UPDATED` with the editor and the before/after values, and the row's audit columns show the App process (`dev_phi_review_app`).
-- [ ] A changed `steward_group` reroutes open items at the next scan.
+- [ ] A changed `steward_emails` list reroutes open items at the next scan.
 
 ---
 
@@ -250,7 +250,6 @@ As Data Platform, I want qa and prod (jobs and the review App) deployed only fro
   - `SELECT` on `system.data_classification.results`
   - `ALL PRIVILEGES` on `<env governance catalog>.data_governance`
   - `READ` on the SMTP secret scope
-- **Decide how the framework service principal reads group member lists for emails.** Workspace SCIM limits member lists to admins (the App's service principal got a 403 in testing). Reviewer authorization does not need it, but the review-request email does whenever a scope's reviewer value is a group. Agree an approach with the platform admin and verify it with a non-admin principal before go-live.
 - Fill in the qa/prod targets: `<qa governance catalog>` / `<qa catalog prefix>` and `<prod governance catalog>` / `<prod catalog prefix>`, plus groups, `framework_service_principal`, `review_app_name`, `warehouse_id`, `review_app_users_group`, and the SMTP settings.
 - Build the CI pipeline: validate, then Python and App tests, then `scripts/deploy.sh <target> <warehouse_id>`, using OAuth M2M.
 
@@ -258,7 +257,7 @@ As Data Platform, I want qa and prod (jobs and the review App) deployed only fro
 - [ ] qa and prod deploy from CI only; bundle validation fails without `framework_service_principal`.
 - [ ] Jobs in qa run as the service principal, and the audit columns show its identity.
 - [ ] The App runs in qa, and its service principal holds only the grants declared in `resources/review_app.yml`.
-- [ ] The service principal can read the tag policy, the App URL, and the member lists of the pilot reviewer groups, confirmed in qa.
+- [ ] The service principal can read the tag policy and the App URL, confirmed in qa.
 - [ ] The qa schedule and triggers are unpaused, and the scan runs Monday 06:00 in `business_timezone`.
 
 ---

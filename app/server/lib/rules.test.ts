@@ -53,34 +53,31 @@ describe('checkDecision', () => {
 });
 
 describe('selectGrant', () => {
-  const scope = (roles: ('STEWARD' | 'GOVERNANCE_OWNER')[]) => ({
-    steward_group: 'clinical_stewards',
-    governance_owner: 'owner@example.com',
-    roles,
-  });
+  const me = 'reviewer@example.com';
+  const scope = (roles: ('STEWARD' | 'GOVERNANCE_OWNER')[]) => ({ roles });
 
   test('review decisions prefer the steward role, then the governance owner', () => {
-    expect(selectGrant(false, true, 'gov', scope(['STEWARD', 'GOVERNANCE_OWNER']))).toEqual({
+    expect(selectGrant(false, true, 'gov', me, scope(['STEWARD', 'GOVERNANCE_OWNER']))).toEqual({
       actingAs: 'STEWARD',
-      via: 'clinical_stewards',
+      via: me,
     });
-    expect(selectGrant(false, false, 'gov', scope(['GOVERNANCE_OWNER']))).toEqual({
+    expect(selectGrant(false, false, 'gov', me, scope(['GOVERNANCE_OWNER']))).toEqual({
       actingAs: 'GOVERNANCE_OWNER',
-      via: 'owner@example.com',
+      via: me,
     });
   });
 
   test('Data Governance membership alone does not authorize review decisions', () => {
-    expect(selectGrant(false, true, 'gov', scope([]))).toBeUndefined();
-    expect(selectGrant(false, false, 'gov', undefined)).toBeUndefined();
+    expect(selectGrant(false, true, 'gov', me, scope([]))).toBeUndefined();
+    expect(selectGrant(false, false, 'gov', me, undefined)).toBeUndefined();
   });
 
   test('Privacy outcomes prefer Data Governance, then the governance owner; stewards cannot record them', () => {
-    expect(selectGrant(true, true, 'gov', scope(['STEWARD']))).toEqual({ actingAs: 'DATA_GOVERNANCE', via: 'gov' });
-    expect(selectGrant(true, false, 'gov', scope(['GOVERNANCE_OWNER']))).toEqual({
+    expect(selectGrant(true, true, 'gov', me, scope(['STEWARD']))).toEqual({ actingAs: 'DATA_GOVERNANCE', via: 'gov' });
+    expect(selectGrant(true, false, 'gov', me, scope(['GOVERNANCE_OWNER']))).toEqual({
       actingAs: 'GOVERNANCE_OWNER',
-      via: 'owner@example.com',
+      via: me,
     });
-    expect(selectGrant(true, false, 'gov', scope(['STEWARD']))).toBeUndefined();
+    expect(selectGrant(true, false, 'gov', me, scope(['STEWARD']))).toBeUndefined();
   });
 });

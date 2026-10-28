@@ -20,11 +20,13 @@ GROUP BY s.scope_id
 ORDER BY classification_completeness;
 
 -- 2. Open items by steward and age (drives reminders at 5 and escalation at 10 business days).
-SELECT i.assigned_steward, b.review_batch_id, b.due_at, i.status, count(*) AS items,
+--    assigned_stewards is the scope's steward_emails list; each steward gets one row per batch.
+SELECT steward, b.review_batch_id, b.due_at, i.status, count(*) AS items,
        datediff(current_date(), to_date(b.created_at)) AS age_days,
        current_timestamp() > b.due_at AS overdue
 FROM <gov>.classification_review_item i
 JOIN <gov>.classification_review_batch b USING (review_batch_id)
+LATERAL VIEW explode(i.assigned_stewards) s AS steward
 WHERE i.status NOT IN ('TAG_VERIFIED', 'ATTESTED_NOT_PHI', 'CLOSED_NO_ACTION')
 GROUP BY ALL
 ORDER BY overdue DESC, age_days DESC;

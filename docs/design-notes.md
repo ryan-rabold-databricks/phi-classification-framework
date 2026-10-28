@@ -11,9 +11,9 @@ design, and why.
 |---|---|
 | `classification_suggestion_mapping` table | The approved mapping from Data Classification `class_tag` values to allowed tag values. Data Governance maintains it in the review App (or `MANUAL` for the initial load). |
 | `classification_review_submission` table | The review App writes each decision exactly as submitted, with the authenticated reviewer, server-captured time, and the suggestion the reviewer saw. Ingestion validates submissions and records outcomes on items and in events; submissions are append-only. |
-| Reviewers from the scope registry | No assignment step. `steward_group` and `governance_owner` each hold one user email or one group name. The scan copies `steward_group` into `assigned_steward`; the governance owner may review in place of a steward, and `DECISION_RECEIVED` records `acting_as`. |
+| Reviewers from the scope registry | No assignment step. `steward_emails` and `governance_owner_emails` are lists of lower-case emails (at least one each). The scan copies `steward_emails` into `assigned_stewards`; governance owners may review in place of a steward, and `DECISION_RECEIVED` records `acting_as`. |
 | Review App | AppKit (TypeScript/React) Databricks App over a SQL warehouse: review and Privacy queues, scope registry and mapping maintenance, correction requests. Replaces the Excel workbooks and the review Volume. |
-| Review-request email | The scan job's `notify_reviewers` task emails each new batch's reviewers (To: `steward_group`; Cc: `governance_owner`) through an SMTP relay, with a link to the batch in the App. `REVIEW_REQUEST_SENT` / `REVIEW_REQUEST_FAILED`. |
+| Review-request email | The scan job's `notify_reviewers` task emails each new batch's reviewers (To: `steward_emails`; Cc: `governance_owner_emails`) through an SMTP relay, with a link to the batch in the App. `REVIEW_REQUEST_SENT` / `REVIEW_REQUEST_FAILED`. |
 | Reference-data audit events | `SCOPE_REGISTRY_UPDATED` and `SUGGESTION_MAPPING_UPDATED` record the actor and the before/after values of every App edit, because the reference tables are updated in place. `CORRECTION_REQUESTED` records corrections requested in the App. |
 
 ## Interpretations and deviations
@@ -102,9 +102,9 @@ design, and why.
 25. **App role checks use the user's own token.** The App uses the user
     token the Apps proxy forwards with the default `iam.current-user:read` scope (it cannot
     be requested explicitly; the Apps API rejects it in `user_api_scopes`) and reads the signed-in user's groups from
-    SCIM `/Me` with the forwarded token. A reviewer value matches when it is the user's
-    email or one of their groups. The App service principal never reads group member
-    lists (workspace SCIM restricts that to admins).
+    SCIM `/Me` with the forwarded token, only to check `governance_group` membership.
+    Steward and governance-owner roles compare the user's email with the scope's email
+    lists. Nothing reads group member lists (workspace SCIM restricts that to admins).
 26. **App grants are declared as App resources.** `resources/review_app.yml` declares
     `uc_securable` resources: `SELECT` on the batch, item, scope, mapping, event, and
     submission tables; `MODIFY` only on the submission, scope, mapping, and event tables;
@@ -117,33 +117,40 @@ design, and why.
     `min_time_between_triggers_seconds: 60` and `wait_after_last_change_seconds: 60`
     (the platform minimum), so validation results appear about a minute or two after a submit.
 
-29. **Ingestion trusts the App's reviewer check.** The App determines each reviewer's role
-    from the signed-in user's own groups and records it with the scope value that
-    authorized it (`acting_as`, `authorized_via`, both NOT NULL with a CHECK on the role).
-    Ingestion confirms the role is valid for the decision (Privacy outcomes:
-    `DATA_GOVERNANCE` or `GOVERNANCE_OWNER`) and that `authorized_via` still equals the
-    scope's current `steward_group`, `governance_owner`, or the Data Governance group, so a
-    registry change after submission invalidates it. It never reads group member lists.
-    Correction scans likewise trust the requester the App passes; only Data Governance,
-    Data Platform, and the App can run the scan job. The trust boundary is MODIFY on the
+29. **Ingestion trusts the App only for the Data Governance role.** Each submission records
+    the role the App chose and what authorized it (`acting_as`, `authorized_via`, both NOT
+    NULL with a CHECK on the role). Ingestion confirms the role is valid for the decision
+    (Privacy outcomes: `DATA_GOVERNANCE` or `GOVERNANCE_OWNER`). Stewards and governance
+    owners are verified directly: `reviewed_by` must be on the scope's current
+    `steward_emails` or `governance_owner_emails`, so a registry change after submission
+    invalidates the decision. `DATA_GOVERNANCE` is a workspace group; for that role
+    ingestion trusts the App's check of the user's own groups and confirms
+    `authorized_via` is the configured `governance_group`. Correction scans likewise trust
+    the requester the App passes; only Data Governance, Data Platform, and the App can run
+    the scan job. The trust boundary for the Data Governance role is MODIFY on the
     submission table, which only the App's service principal holds.
 
-30. **Review-request failures are isolated per batch.** Reviewer values are resolved
-    per batch inside the error handling, so one unreadable group (403) or empty value
-    never stops other batches; unresolved values are listed on the event and the email
-    goes to the rest. A batch with no resolvable recipients records
-    `REVIEW_REQUEST_FAILED` with `kind = RECIPIENTS` once and is excluded from later scans
-    (a configuration problem should not fail every weekly scan); only `kind = SEND`
-    failures fail the task and are retried.
+30. **Review-request failures are isolated per batch.** Recipients come straight from the
+    scope's email lists (To `steward_emails`; Cc `governance_owner_emails` minus To), so no
+    group membership is read. Each batch is handled on its own, so one failure never stops
+    the others. A batch with no recipients records `REVIEW_REQUEST_FAILED` with
+    `kind = RECIPIENTS` once and is excluded from later scans (a configuration problem
+    should not fail every weekly scan); only `kind = SEND` failures fail the task and are
+    retried.
+
+31. **Scope reviewers are email lists, not groups.** `steward_emails` and
+    `governance_owner_emails` (ARRAY<STRING>, at least one lower-case email each, enforced
+    by CHECK constraints) replace one-email-or-one-group values. Workspace SCIM restricts
+    group member lists to admins (the App service principal received `403 ... is only
+    accessible by admins`), so group values would have required elevated permissions for
+    the email and for verifying reviewers. With lists, nothing reads group membership and
+    ingestion verifies stewards and owners itself. Trade-off: the lists are not synced from
+    the identity provider, so Data Governance updates a scope when stewards join, leave, or
+    change role; every change is audited as `SCOPE_REGISTRY_UPDATED` with before/after
+    values. The reference-data loader takes semicolon-separated emails.
 
 ## Open items for the customer
 
-- **Group membership reads for review-request emails.** Confirmed in testing: the App
-  service principal received `403 ... is only accessible by admins` from SCIM Groups
-  `get`. Reviewer authorization no longer needs member lists (see "Ingestion trusts the
-  App's reviewer check"), but the notify task's email expansion does whenever a scope's
-  `steward_group` or `governance_owner` is a group. Decide how the qa/prod framework
-  service principal gets that ability; not yet verified with a non-admin principal.
 - **Tag policy reads.** The App service principal could read the governed tag policy in
   the sandbox. Confirm the same for the framework service principal in qa and prod.
 - **App URL lookup by the jobs.** The notify task resolves the App URL with the Apps API

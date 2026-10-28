@@ -134,11 +134,11 @@ class Scan:
 
         sp.createDataFrame([(v,) for v in sorted(policy.allowed)], StructType([StructField("value", StringType(), False)])).createOrReplaceTempView("phi_allowed_values")
         scope_rows = [
-            (r["scope_id"], r["catalog_name"], r["schema_name"], r["risk_tier"], r["steward_group"]) for r in scopes
+            (r["scope_id"], r["catalog_name"], r["schema_name"], r["risk_tier"], list(r["steward_emails"] or [])) for r in scopes
         ]
         sp.createDataFrame(
             scope_rows,
-            "scope_id string, catalog_name string, schema_name string, risk_tier string, steward_group string",
+            "scope_id string, catalog_name string, schema_name string, risk_tier string, steward_emails array<string>",
         ).createOrReplaceTempView("phi_scopes")
 
         gov_cat, gov_sch = self.s.governance_catalog, self.s.governance_schema
@@ -156,7 +156,7 @@ class Scan:
                 )
             fp = fingerprint_sql("c.table_catalog", "c.table_schema", "c.table_name", "c.column_name", "c.full_data_type", "c.comment")
             col_parts.append(
-                f"""SELECT s.scope_id, s.risk_tier, s.steward_group,
+                f"""SELECT s.scope_id, s.risk_tier, s.steward_emails,
                     c.table_catalog AS catalog_name, c.table_schema AS schema_name, c.table_name, t.table_type,
                     c.column_name, c.full_data_type, c.comment AS column_comment, {fp} AS column_fingerprint
                 FROM {qi(cat)}.information_schema.columns c
@@ -365,8 +365,8 @@ class Scan:
     # ------------------------------------------------------------------
     def _update_open_items(self) -> None:
         stage = f"{self.s.schema_fqn}.{qi(STAGE_TABLE)}"
-        # assigned_steward follows the scope registry, so a changed steward_group reroutes open items.
-        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value", "assigned_steward"]
+        # assigned_stewards follows the scope registry, so changed steward_emails reroute open items.
+        metadata = ["table_type", "full_data_type", "column_comment", "column_fingerprint", "current_tag_value", "assigned_stewards"]
         frozen = ["issue_type", "suggested_tag_value", "suggestion_reason"]
         # Issue and suggestion refresh only while an item awaits its first decision and is not a
         # correction. The App records the suggestion each reviewer saw, and ingestion rejects an
@@ -383,7 +383,7 @@ class Scan:
         )
         self.rt.sql(
             f"""MERGE INTO {self.rt.t(c.T_ITEM)} t
-            USING (SELECT *, steward_group AS assigned_steward FROM {stage}
+            USING (SELECT *, steward_emails AS assigned_stewards FROM {stage}
                    WHERE issue_type IS NOT NULL AND open_item_id IS NOT NULL) s
             ON t.review_item_id = s.open_item_id
             WHEN MATCHED AND t.status IN ({in_list(c.NON_TERMINAL_STATUSES)}) AND ({changed})
@@ -413,10 +413,10 @@ class Scan:
             ON t.review_item_id = s.review_item_id
             WHEN NOT MATCHED THEN INSERT (review_item_id, review_batch_id, catalog_name, schema_name, table_name,
                 table_type, column_name, full_data_type, column_comment, column_fingerprint, issue_type,
-                current_tag_value, suggested_tag_value, suggestion_reason, assigned_steward, status, {', '.join(audit)})
+                current_tag_value, suggested_tag_value, suggestion_reason, assigned_stewards, status, {', '.join(audit)})
             VALUES (s.review_item_id, s.new_batch_id, s.catalog_name, s.schema_name, s.table_name, s.table_type,
                 s.column_name, s.full_data_type, s.column_comment, s.column_fingerprint, s.issue_type,
-                s.current_tag_value, s.suggested_tag_value, s.suggestion_reason, s.steward_group,
+                s.current_tag_value, s.suggested_tag_value, s.suggestion_reason, s.steward_emails,
                 {lit(c.PENDING_STEWARD_REVIEW)},
                 {', '.join(audit.values())})"""
         )

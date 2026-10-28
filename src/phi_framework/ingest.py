@@ -99,7 +99,7 @@ class Ingestion:
         items = {
             r["review_item_id"]: r
             for r in self.rt.rows(
-                f"""SELECT i.*, b.created_at AS batch_created_at, s.steward_group, s.governance_owner, s.risk_tier
+                f"""SELECT i.*, b.created_at AS batch_created_at, s.steward_emails, s.governance_owner_emails, s.risk_tier
                 FROM {self.rt.t(c.T_ITEM)} i
                 JOIN {self.rt.t(c.T_BATCH)} b ON b.review_batch_id = i.review_batch_id
                 JOIN {self.rt.t(c.T_SCOPE)} s ON s.scope_id = b.scope_id
@@ -185,8 +185,8 @@ class Ingestion:
                 status=status,
                 suggested_tag_value=it["suggested_tag_value"],
                 batch_created_at=it["batch_created_at"],
-                steward_group=it["steward_group"],
-                governance_owner=it["governance_owner"],
+                steward_emails=tuple(it["steward_emails"] or ()),
+                governance_owner_emails=tuple(it["governance_owner_emails"] or ()),
             )
             out = validate_decision(
                 ctx, s, self.policy.is_allowed, self.s.governance_group, now

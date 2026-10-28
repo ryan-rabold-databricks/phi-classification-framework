@@ -92,9 +92,9 @@ flowchart LR
 
 | # | Step | Who | What happens |
 |---|---|---|---|
-| 1 | Define scope | Data Governance, in the App | Maintain `classification_scope_registry` (catalog/schema, risk tier, `steward_group`, `governance_owner`) and `classification_suggestion_mapping`. Every edit records a before/after audit event. |
-| 2 | Weekly scan | `scan` job (Monday 06:00) | Reads metadata, tags, attestations, and Data Classification results. Opens or refreshes one review item per actionable column. Each item's reviewers are the scope's `steward_group`. |
-| 3 | Notify reviewers | `scan` job, `notify_reviewers` task | One email per new batch: to everyone the scope's `steward_group` names, copying the `governance_owner`, with a link to the batch in the App. |
+| 1 | Define scope | Data Governance, in the App | Maintain `classification_scope_registry` (catalog/schema, risk tier, `steward_emails`, `governance_owner_emails`) and `classification_suggestion_mapping`. Every edit records a before/after audit event. |
+| 2 | Weekly scan | `scan` job (Monday 06:00) | Reads metadata, tags, attestations, and Data Classification results. Opens or refreshes one review item per actionable column. Each item's reviewers are the scope's `steward_emails`. |
+| 3 | Notify reviewers | `scan` job, `notify_reviewers` task | One email per new batch: to the scope's `steward_emails`, copying its `governance_owner_emails`, with a link to the batch in the App. |
 | 4 | Review | Stewards (or the governance owner), in the App | Each reviewer sees only the scopes they review, chooses a decision per column (or bulk-approves suggestions), and submits. The App records the signed-in identity and the submit time. |
 | 5 | Ingest and validate | `ingestion` job (table-update trigger on `classification_review_submission`) | Re-validates every submission and writes immutable plans, non-PHI attestations, Privacy routing, or `VALIDATION_FAILED`. Rejected items return to the reviewer's queue with the reason. |
 | 6 | Apply tags | `application` job (table-update trigger on `classification_application_plan`) | Rechecks each column, executes the stored DDL, verifies the tag in `information_schema.column_tags`. |
@@ -123,18 +123,24 @@ allowed value. Sample values are never read into the framework.
 
 Reviewers come from the scope registry, not from an assignment step:
 
-- **`steward_group`** holds one user email or one group name. Every user it
-  names receives the review email and can decide that scope's items.
-- **`governance_owner`** holds one user email or one group name. It is copied on
-  the review email and may review in place of a steward.
-- A value matches a workspace group with that exact name first; otherwise a
-  value containing `@` is a single user.
+- **`steward_emails`** is a list of lower-case emails. Each address receives the
+  review email and can decide that scope's items.
+- **`governance_owner_emails`** is a list of lower-case emails. They are copied on
+  the review email, may review in place of a steward, and may record Privacy
+  outcomes for the scope.
+- Each list needs at least one email (a CHECK constraint enforces lower-case
+  addresses). Data Governance maintains the lists in the App; every change is
+  recorded as `SCOPE_REGISTRY_UPDATED` with the values before and after.
+- **Trade-off:** the lists are not synced from the identity provider. When a
+  steward joins, leaves, or changes role, Data Governance updates the scope. In
+  return, no group membership is read anywhere, so no elevated permissions are
+  needed, and every reviewer change is explicit and audited.
 - Each `DECISION_RECEIVED` event records `acting_as`: `STEWARD`,
   `GOVERNANCE_OWNER`, or (for Privacy outcomes) `DATA_GOVERNANCE`.
-- Privacy outcomes can be recorded by a member of `governance_group` or by the
-  scope's `governance_owner`.
-- Each scan refreshes `assigned_steward` on open items from the registry, so a
-  changed `steward_group` reroutes work already in flight.
+- Privacy outcomes can be recorded by a member of `governance_group` or by a
+  scope's governance owner.
+- Each scan refreshes `assigned_stewards` on open items from the registry, so a
+  changed `steward_emails` list reroutes work already in flight.
 
 ---
 
@@ -156,9 +162,10 @@ How it is built:
 - **Identity.** The Databricks Apps proxy authenticates every request and sets
   `X-Forwarded-Email`. The App also uses the user token the proxy forwards
   with the default `iam.current-user:read` scope and reads the signed-in user's own groups from SCIM `/Me` with
-  their forwarded token. Role checks compare those groups and the user's email
-  with each scope's `steward_group` and `governance_owner`. The App's service
-  principal never reads group member lists.
+  their forwarded token, which is used only to check `governance_group`
+  membership. Steward and owner roles compare the user's email with each
+  scope's `steward_emails` and `governance_owner_emails`. Nothing reads group
+  member lists.
 - **Server routes.** All reads and writes go through `app/server/routes.ts`
   (`/api/review/*`). Queues are filtered on the server to the scopes the user
   may act on. Every statement is parameterized and runs as the App's service
@@ -166,11 +173,13 @@ How it is built:
 - **Writes.** A submit writes one submission set per batch to
   `classification_review_submission`, with the authenticated reviewer, the
   server time, the suggestion the reviewer saw, and the role the reviewer acted
-  in with the scope value that authorized it (`acting_as`, `authorized_via`).
-  The App checks every decision for immediate feedback. Ingestion re-checks the
-  decision rules and trusts the App's reviewer check: it confirms the recorded
-  value is still the scope's current steward group, governance owner, or Data
-  Governance group, and never reads group member lists. Scope and mapping edits are MERGEs plus a
+  in with what authorized it (`acting_as`, `authorized_via`: the reviewer's
+  email, or the Data Governance group). The App checks every decision for
+  immediate feedback. Ingestion re-checks the decision rules and verifies
+  stewards and governance owners directly against the scope's current email
+  lists. For the Data Governance role only, it trusts the App's check of the
+  user's own groups and confirms the recorded group is the configured
+  `governance_group`. Scope and mapping edits are MERGEs plus a
   `SCOPE_REGISTRY_UPDATED` / `SUGGESTION_MAPPING_UPDATED` event with the
   before and after values. A correction request starts the scan job with the
   correction parameters and records `CORRECTION_REQUESTED`.
@@ -210,20 +219,15 @@ are honored only when `NODE_ENV=development`.
 | Governed tag | An account-level tag policy (default key `phi_classification`) with the allowed values. Its values are the single source of truth for validation. |
 | Data Classification | Enabled on each governed catalog, with `SELECT` on `system.data_classification.results` granted to the framework identity only. |
 | SQL warehouse | Used by the App, by `scripts/deploy.sh` to bootstrap the schema, and by the operator tools. |
-| Groups | One Data Governance group, one Data Platform group, one App users group, and (optionally) one steward group per scope. |
+| Groups | One Data Governance group, one Data Platform group, and one App users group (CAN_USE on the App; include every steward and governance owner). Scope reviewers are email lists, not groups. |
 | SMTP relay | For review-request emails. Optional: without it, reviewers still see their queues in the App. |
 | Service principal | qa and prod jobs run as a dedicated service principal. |
 
-> **Group membership reads (email only, open decision).** Workspace SCIM
-> restricts reading a group's member list to workspace admins (the App's
-> service principal received `403 ... is only accessible by admins`). Reviewer
-> authorization never needs it: the App checks the signed-in user's own groups,
-> and ingestion and correction scans trust that check. Only the notify task's
-> email expansion reads member lists: to email every member of a group-valued
-> `steward_group` or `governance_owner`, the framework service principal in qa
-> and prod needs to read those member lists. How to grant it is not decided or
-> verified. Until it is, single-email reviewer values are emailed and group
-> values are not; reviewers can still work their queues in the App.
+> **No group membership reads.** Workspace SCIM restricts reading a group's
+> member list to workspace admins. The framework never needs it: scope reviewers
+> are email lists, and the only group check (Data Governance) uses the signed-in
+> user's own groups in the App. The jobs' service principal needs no elevated
+> permissions.
 
 ---
 
@@ -278,6 +282,8 @@ uv run python tools/load_reference_data.py -p <profile> --warehouse-id <id> \
     --catalog <governance_catalog> --schema data_governance \
     --scopes reference_data/scope_registry.csv \
     --mapping reference_data/suggestion_mapping.csv
+# scope_registry.csv: steward_emails and governance_owner_emails hold semicolon-separated emails
+# (see reference_data/scope_registry.example.csv)
 
 # 3. Run the first scan (dev: jobs run only when started manually)
 databricks bundle run phi_classification_scan -t dev -p <profile>
@@ -339,8 +345,8 @@ and returns rejected ones to the reviewer's queue with the reason. Tags are
 applied and verified within minutes.
 
 **Privacy review.** Items in `NEEDS_PRIVACY_REVIEW` appear on the Privacy
-review tab. Once Privacy decides, a member of `governance_group` or the
-scope's `governance_owner` records the outcome there. A rejected outcome keeps
+review tab. Once Privacy decides, a member of `governance_group` or one of the
+scope's governance owners records the outcome there. A rejected outcome keeps
 the item in Privacy review.
 
 **Corrections.** On the Scope registry tab, Data Governance requests a
@@ -385,7 +391,7 @@ Integrity controls (all created by `src/phi_framework/setup.py`):
 
 - **Deterministic keys** (`make_key`): reruns and retries never duplicate rows.
 - **CHECK constraints** on every controlled value, the environment/catalog
-  guardrail, non-empty trimmed reviewer values, a lower-case `reviewed_by`, and
+  guardrail, non-empty lists of lower-case reviewer emails, a lower-case `reviewed_by`, `acting_as`, and
   audit process names. `MANUAL` is allowed only on the two reference tables;
   the App process only on the submission, reference, and event tables.
 - **`delta.appendOnly`** on plans, events, and submissions.
@@ -404,7 +410,7 @@ Minimum grants (verify in your environment; names are illustrative):
 
 | Principal | Grants |
 |---|---|
-| Framework service principal | `USE CATALOG`, `USE SCHEMA`, and `SELECT` (or `BROWSE`) on governed catalogs so their objects appear in `information_schema`; `APPLY TAG` on governed catalogs; `ASSIGN` on the governed tag policy; `SELECT` on `system.data_classification.results`; `ALL PRIVILEGES` on the governance schema; `READ` on the SMTP secret scope; the ability to read reviewer group membership (see the prerequisite note). |
+| Framework service principal | `USE CATALOG`, `USE SCHEMA`, and `SELECT` (or `BROWSE`) on governed catalogs so their objects appear in `information_schema`; `APPLY TAG` on governed catalogs; `ASSIGN` on the governed tag policy; `SELECT` on `system.data_classification.results`; `ALL PRIVILEGES` on the governance schema; `READ` on the SMTP secret scope. No group membership access is needed. |
 | Review App service principal | Declared in `resources/review_app.yml` and granted on deploy (see [The review App](#the-review-app)). Reads the governed tag policy for allowed values. |
 | Data Governance group | `CAN_USE` on the App; `CAN_MANAGE_RUN` on the scan and ingestion jobs; `SELECT` on governance tables for reporting. Edits reference data through the App, not directly. |
 | Stewards and governance owners | `CAN_USE` on the App (through `review_app_users_group`). No direct table access. |
@@ -432,7 +438,7 @@ Notes:
 ## Testing
 
 ```bash
-# Python unit tests (no workspace needed): 64 tests
+# Python unit tests (no workspace needed): 61 tests
 uv run --with pytest pytest
 
 # Lint
@@ -444,7 +450,6 @@ cd app && npx vitest run && npm run lint && npm run typecheck && cd ..
 # End-to-end against a deployed dev sandbox with synthetic data (81 checks)
 uv run python tests/integration/e2e_sandbox.py \
     -p <profile> --warehouse-id <id> \
-    --steward-group <dev test steward group> \
     --mapping <mapping CSV whose values match the tag policy>
 ```
 
@@ -456,9 +461,9 @@ Before running the end-to-end test:
   schema starting with `phifw_`. `--reset` drops and recreates the governance schema and the
   synthetic schemas, and it refuses to run unless every one of them starts with `phifw_`.
   A real `data_governance` schema can never be dropped by the test.
-- **Join the test groups.** Create a dev-only steward group and pass it as `--steward-group`.
-  The user running the test must belong to that group, to the bundle's `governance_group`,
-  and to `review_app_users_group`.
+- **Join the test groups.** The user running the test must belong to the bundle's
+  `governance_group` and `review_app_users_group`. The synthetic scopes list the
+  user's email as a clinical steward and as the finance governance owner.
 
 `--mapping` must point to a mapping whose values exist in your tag policy.
 `tests/integration/fixtures/suggestion_mapping_hipaa18.csv` targets an 18-identifier
@@ -467,8 +472,8 @@ With a governed tag, the test exercises `ORPHANED_TAG` instead of `INVALID_TAG_V
 because Unity Catalog rejects values outside the policy.
 
 The end-to-end test seeds synthetic tables, a materialized view, and synthetic
-Data Classification results. One scope uses a group as its steward group; the
-other uses single emails, with the test user as governance owner only, so its
+Data Classification results. In the clinical scope the test user is one of two
+stewards; in the finance scope the test user is only the governance owner, so its
 decisions exercise review in place of a steward. The test then:
 
 - checks the App's identity and role resolution and the reviewer queue;
@@ -479,8 +484,8 @@ decisions exercise review in place of a steward. The test then:
   wrong queue for a Privacy item, non-governance Privacy outcome);
 - covers Privacy outcomes, ignored changes to accepted decisions, stale
   detection, removed columns, re-attestation, a correction requested in the App
-  with tag removal, scope and mapping edits with audit events, and
-  append-only/CHECK enforcement.
+  with tag removal, scope and mapping edits with audit events, rerouting open
+  items when a scope's `steward_emails` change, and append-only/CHECK enforcement.
 
 ---
 
@@ -500,7 +505,7 @@ src/phi_framework/
   ddl.py / setup.py            Table definitions and idempotent reconciliation
   keys.py                      Deterministic keys and column fingerprint
   runtime.py                   Spark/SDK context, audit columns, event writer
-  directory.py                 Tag policy values, group membership, reviewer values
+  directory.py                 Governed tag policy allowed values
   scan.py                      Issue detection, suggestions, item/batch lifecycle
   notify.py                    Review-request emails
   validation.py                Pure decision-validation rules

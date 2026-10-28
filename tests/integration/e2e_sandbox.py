@@ -5,8 +5,7 @@ deployed review App over HTTPS as the signed-in user, the way stewards and Data
 Governance use it, and asserts every state transition. Synthetic data only.
 
   uv run python tests/integration/e2e_sandbox.py \
-      -p <profile> --warehouse-id <id> --test-schema-prefix phifw_test \
-      --steward-group <dev test steward group> --mapping <mapping CSV>
+      -p <profile> --warehouse-id <id> --test-schema-prefix phifw_test --mapping <mapping CSV>
 
 A few deliberately invalid submissions are written directly to the submission
 table under the App's process name, to prove that ingestion rejects anything the
@@ -14,7 +13,8 @@ App's own checks would have blocked.
 
 Bundle variables (governance catalog/schema, tag key, groups, ...) are read
 from `databricks bundle validate -t dev`. The current user must be a member of
-the steward group and the governance group.
+the bundle's governance_group; the synthetic scopes list the user's email as a
+clinical steward and as the finance governance owner.
 
 --reset drops and recreates the governance schema and the synthetic schemas.
 It refuses to run unless the target's env is dev AND every schema it would drop
@@ -22,8 +22,6 @@ starts with the test prefix "phifw_" (so a real governance schema such as
 data_governance can never be dropped by mistake). Point the bundle's
 governance_schema at a throwaway schema (for example phifw_e2e) before using it.
 
---steward-group names the group used as the steward group for the synthetic
-scopes. The current user must be a member of it and of the bundle's governance_group.
 """
 
 from __future__ import annotations
@@ -54,6 +52,13 @@ from phi_framework.sqlutil import fqn, lit, qi
 
 RESULTS: list[tuple[str, bool, str]] = []
 FINANCE_STEWARD = "finance.steward@example.com"
+CLINICAL_STEWARD_2 = "clinical.steward2@example.com"
+CLINICAL_OWNER = "clinical.owner@example.com"
+
+
+def emails(v) -> list[str]:
+    """ARRAY<STRING> from the SQL helper (a JSON string) or a list -> list of emails."""
+    return json.loads(v) if isinstance(v, str) else list(v or [])
 RESET_SAFE_PREFIX = "phifw_"
 
 
@@ -242,6 +247,9 @@ class E2E:
         self.q(f"""CREATE OR REPLACE TABLE {fqn(C, self.finance, 'billing')} (
             account_number STRING COMMENT 'Billing account number', amount DECIMAL(10,2) COMMENT 'Charge amount',
             patient_email STRING COMMENT 'Patient email address')""")
+        # Synthetic tables created by later steps of earlier runs.
+        for leftover in ("reroute", "temp_drop"):
+            self.q(f"DROP TABLE IF EXISTS {fqn(C, self.finance, leftover)}")
         for col in ["account_number", "amount", "patient_email"]:
             self.q(f"ALTER TABLE {fqn(C, self.finance, 'billing')} ALTER COLUMN {qi(col)} UNSET TAGS ({lit(self.tag)})")
         self.mv = False
@@ -278,11 +286,11 @@ class E2E:
             for s, t, col, tag, conf in rows
         )
         self.q(f"INSERT INTO {dc} VALUES {values}")
-        stewards, gov = self.a.steward_group, self.v["governance_group"]
-        # Clinical: group reviewers. Finance: single-email reviewers; the current user is only the
+        # Clinical: the current user is one of two stewards. Finance: the current user is only the
         # governance owner, so finance decisions exercise "owner reviews in place of a steward".
-        scopes = f"""scope_id,catalog_name,schema_name,environment,risk_tier,steward_group,governance_owner,scan_enabled,effective_date,expiration_date
-SCOPE-CLINICAL-DEV,{C},{self.clinical},dev,HIGH,{stewards},{gov},true,2026-01-01,
+        stewards = [self.me, CLINICAL_STEWARD_2]
+        scopes = f"""scope_id,catalog_name,schema_name,environment,risk_tier,steward_emails,governance_owner_emails,scan_enabled,effective_date,expiration_date
+SCOPE-CLINICAL-DEV,{C},{self.clinical},dev,HIGH,{';'.join(stewards)},{CLINICAL_OWNER},true,2026-01-01,
 SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},true,2026-01-01,
 """
         path = "/tmp/phifw_e2e_scopes.csv"
@@ -317,8 +325,8 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
         check("two batches (one per scope)", len(batches) == 2, str(len(batches)))
         pn = self.item(cl, "patient_encounter", "patient_name")
         check("MISSING_CLASSIFICATION opened", pn and pn["issue_type"] == c.MISSING_CLASSIFICATION)
-        check("assigned_steward is the scope's steward_group", pn["assigned_steward"] == self.stewards
-              and self.item(fi, "billing", "amount")["assigned_steward"] == FINANCE_STEWARD)
+        check("assigned_stewards are the scope's steward_emails", emails(pn["assigned_stewards"]) == self.stewards
+              and emails(self.item(fi, "billing", "amount")["assigned_stewards"]) == [FINANCE_STEWARD])
         check("suggestion from DC", pn["suggested_tag_value"] == self.mapping["class.name"], str(pn["suggested_tag_value"]))
         check("conflicting detections -> no suggestion", self.item(cl, "patient_encounter", "notes")["suggested_tag_value"] is None)
         check("LOW confidence -> no suggestion", self.item(cl, "patient_encounter", "encounter_date")["suggested_tag_value"] is None)
@@ -346,8 +354,8 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
         status, me = self.app("GET", "/api/review/me")
         roles = {s["scope_id"]: s["roles"] for s in me.get("scopes", [])}
         check("App identifies the signed-in user", status == 200 and me["email"] == self.me, str(me)[:300])
-        check("steward of clinical via group", "STEWARD" in roles.get("SCOPE-CLINICAL-DEV", []), str(roles))
-        check("governance owner of finance via email", roles.get("SCOPE-FINANCE-DEV") == ["GOVERNANCE_OWNER"], str(roles))
+        check("steward of clinical by email", roles.get("SCOPE-CLINICAL-DEV") == ["STEWARD"], str(roles))
+        check("governance owner of finance by email", roles.get("SCOPE-FINANCE-DEV") == ["GOVERNANCE_OWNER"], str(roles))
         check("Data Governance membership", me.get("isGovernance") is True)
         q = self.queue()
         check("queue lists every item in both scopes", len(q) == n_items, str(len(q)))
@@ -379,13 +387,13 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
               sub["reviewed_by"] == self.me and sub["audit_created_process"] == c.app_process_name("dev"), str(sub)[:300])
         auth = {(r["acting_as"], r["authorized_via"]) for r in self.q(f"SELECT DISTINCT acting_as, authorized_via FROM {self.t(c.T_SUBMISSION)}")}
         check("App records the role and the scope value that authorized it",
-              auth == {("STEWARD", self.stewards), ("GOVERNANCE_OWNER", self.me)}, str(auth))
+              auth == {("STEWARD", self.me), ("GOVERNANCE_OWNER", self.me)}, str(auth))
         # Bypass the App: ingestion must still reject an invalid value and an authorization that does not
         # match the scope's current reviewers.
         self.inject(c.SUB_REVIEW, self.item(cl, "lab_result", "patient_mrn"), c.CORRECT_CLASSIFICATION, by=self.me,
-                    acting_as="STEWARD", via=self.stewards, corrected="not_a_value")
+                    acting_as="STEWARD", via=self.me, corrected="not_a_value")
         self.inject(c.SUB_REVIEW, self.item(fi, "billing", "patient_email"), c.APPROVE_SUGGESTION, by="not.a.reviewer@example.com",
-                    acting_as="STEWARD", via="phifw_not_the_finance_reviewers")
+                    acting_as="STEWARD", via="not.a.reviewer@example.com")
         self.run_job("phi_decision_ingestion")
         check("approve -> PLANNED", self.item(cl, "patient_encounter", "patient_name")["status"] == c.PLANNED)
         check("correct -> PLANNED", self.item(cl, "patient_encounter", "encounter_date")["status"] == c.PLANNED)
@@ -437,7 +445,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
             "decision": c.CONFIRM_NOT_PHI, "steward_comment": "steward tries to close it"}},
             {(cl, "patient_encounter", "notes"): notes})
         check("App refuses a review decision on a Privacy item", status == 422)
-        self.inject(c.SUB_REVIEW, notes, c.CONFIRM_NOT_PHI, by=self.me, acting_as="STEWARD", via=self.stewards,
+        self.inject(c.SUB_REVIEW, notes, c.CONFIRM_NOT_PHI, by=self.me, acting_as="STEWARD", via=self.me,
                     comment="steward tries to close it")
         self.inject(c.SUB_PRIVACY, notes, c.CONFIRM_NOT_PHI, by="not.gov@example.com", acting_as="DATA_GOVERNANCE",
                     via="phifw_not_the_governance_group", comment="not from governance")
@@ -453,7 +461,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
         check("App accepts the Privacy outcome", status == 200, str(body)[:300])
         # A change to an accepted decision is ignored and reported.
         self.inject(c.SUB_REVIEW, self.item(cl, "patient_encounter", "patient_name"), c.CORRECT_CLASSIFICATION, by=self.me,
-                    acting_as="STEWARD", via=self.stewards, corrected="mrn")
+                    acting_as="STEWARD", via=self.me, corrected="mrn")
         q = self.queue()
         status, body = self.submit("REVIEW", {
             (cl, "lab_result", "patient_mrn"): {"decision": c.CORRECT_CLASSIFICATION, "corrected_tag_value": "mrn"},
@@ -537,16 +545,16 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
 
         print("== 12. Data Governance maintains reference data in the App")
         status, body = self.app("PUT", "/api/review/scopes/SCOPE-FINANCE-DEV", {
-            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_group": FINANCE_STEWARD,
-            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
+            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_emails": [FINANCE_STEWARD],
+            "governance_owner_emails": [self.me], "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
         check("scope edit saved", status == 200, str(body)[:300])
         ev = self.q(f"SELECT CAST(event_details AS STRING) AS d, business_actor FROM {self.t(c.T_EVENT)} "
                     f"WHERE event_type = 'SCOPE_REGISTRY_UPDATED'")
         check("scope edit recorded with before/after and actor", bool(ev) and '"before"' in ev[0]["d"] and "STANDARD" in ev[0]["d"]
               and ev[0]["business_actor"] == self.me, str(ev)[:300])
         status, _ = self.app("PUT", "/api/review/scopes/SCOPE-OTHER-DEV", {
-            "catalog_name": "other_catalog", "schema_name": "*", "risk_tier": "HIGH", "steward_group": FINANCE_STEWARD,
-            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01"})
+            "catalog_name": "other_catalog", "schema_name": "*", "risk_tier": "HIGH", "steward_emails": [FINANCE_STEWARD],
+            "governance_owner_emails": [self.me], "scan_enabled": True, "effective_date": "2026-01-01"})
         check("scope outside this environment refused", status == 422)
         status, body = self.app("PUT", "/api/review/mappings/class.e2e_test", {
             "phi_tag_value": self.mapping["class.name"], "is_active": False, "notes": "E2E"})
@@ -554,7 +562,7 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
         status, _ = self.app("PUT", "/api/review/mappings/class.e2e_test", {"phi_tag_value": "not_a_value", "is_active": True})
         check("mapping to a value outside the policy refused", status == 422)
 
-        print("== 12b. A steward-group change reroutes open items; a recorded decision freezes the suggestion")
+        print("== 12b. A steward-list change reroutes open items; a recorded decision freezes the suggestion")
         dc = fqn(self.cat, self.support, "dc_results")
         self.q(f"CREATE OR REPLACE TABLE {fqn(self.cat, fi, 'reroute')} (c1 STRING COMMENT 'one', c2 STRING COMMENT 'two')")
         for col in ("c1", "c2"):
@@ -562,13 +570,13 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
                 'reroute', {lit(col)}, 'string', 'class.name', array(), 'HIGH', 0.9)""")
         self.run_job("phi_classification_scan", self.scan_params)
         c1, c2 = self.item(fi, "reroute", "c1", True), self.item(fi, "reroute", "c2", True)
-        check("new items routed to the scope's current steward group",
-              c1["assigned_steward"] == FINANCE_STEWARD and c1["suggested_tag_value"] == self.mapping["class.name"])
+        check("new items routed to the scope's current steward emails",
+              emails(c1["assigned_stewards"]) == [FINANCE_STEWARD] and c1["suggested_tag_value"] == self.mapping["class.name"])
         new_steward = "finance.steward2@example.com"
         status, body = self.app("PUT", "/api/review/scopes/SCOPE-FINANCE-DEV", {
-            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_group": new_steward,
-            "governance_owner": self.me, "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
-        check("steward group changed in the App", status == 200, str(body)[:300])
+            "catalog_name": self.cat, "schema_name": fi, "risk_tier": "HIGH", "steward_emails": [new_steward],
+            "governance_owner_emails": [self.me], "scan_enabled": True, "effective_date": "2026-01-01", "expiration_date": None})
+        check("steward emails changed in the App", status == 200, str(body)[:300])
         # Record a (rejected) decision on c1 only, then change the Data Classification result for both columns.
         self.inject(c.SUB_REVIEW, c1, c.CORRECT_CLASSIFICATION, by=self.me, acting_as="GOVERNANCE_OWNER", via=self.me,
                     corrected="not_a_value")
@@ -579,12 +587,14 @@ SCOPE-FINANCE-DEV,{C},{self.finance},dev,STANDARD,{FINANCE_STEWARD},{self.me},tr
                 'reroute', {lit(col)}, 'string', 'class.email_address', array(), 'HIGH', 0.9)""")
         self.run_job("phi_classification_scan", self.scan_params)
         c1, c2 = self.item(fi, "reroute", "c1", True), self.item(fi, "reroute", "c2", True)
-        check("open items rerouted to the new steward group",
-              c1["assigned_steward"] == new_steward and c2["assigned_steward"] == new_steward, f"{c1['assigned_steward']}")
+        check("open items rerouted to the new steward emails",
+              emails(c1["assigned_stewards"]) == [new_steward] and emails(c2["assigned_stewards"]) == [new_steward],
+              f"{c1['assigned_stewards']}")
         check("suggestion frozen once a decision is recorded", c1["suggested_tag_value"] == self.mapping["class.name"],
               str(c1["suggested_tag_value"]))
         check("suggestion refreshes while no decision is recorded",
               c2["suggested_tag_value"] == self.mapping["class.email_address"], str(c2["suggested_tag_value"]))
+        self.q(f"DROP TABLE {fqn(self.cat, fi, 'reroute')}")
 
         print("== 13. Audit columns and writer constraints")
         bad = self.sql.scalar(
@@ -603,8 +613,6 @@ def main() -> None:
     ap.add_argument("--warehouse-id", required=True)
     ap.add_argument("--test-schema-prefix", default="phifw_test")
     ap.add_argument("--reset", action="store_true")
-    ap.add_argument("--steward-group", default="phifw_clinical_stewards",
-                    help="Steward group for the synthetic scopes; the current user must be a member")
     ap.add_argument("--skip-mv", action="store_true")
     ap.add_argument("--mapping", default="reference_data/suggestion_mapping.csv",
                     help="Suggestion mapping CSV whose values match the tag's allowed values")

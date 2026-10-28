@@ -18,34 +18,34 @@ export type ActingAs = 'STEWARD' | 'GOVERNANCE_OWNER' | 'DATA_GOVERNANCE';
 
 export interface Grant {
   actingAs: ActingAs;
-  /** Scope value (or Data Governance group) that authorized the role; ingestion re-matches it. */
+  /** Reviewer email (checked against the scope's lists by ingestion), or the Data Governance group. */
   via: string;
 }
 
 export interface ScopeRoles {
-  steward_group: string;
-  governance_owner: string;
   roles: ActingAs[];
 }
 
 /**
  * The role a reviewer acts in for one item, or undefined when they may not act on it.
  * Review decisions: steward first, then governance owner. Privacy outcomes: Data Governance
- * first, then governance owner. Ingestion trusts this choice (see phi_framework.validation).
+ * first, then governance owner. Ingestion re-checks steward and owner roles against the scope's
+ * email lists and trusts the App for Data Governance (see phi_framework.validation).
  */
 export function selectGrant(
   privacy: boolean,
   isGovernance: boolean,
   governanceGroup: string,
+  email: string,
   scope: ScopeRoles | undefined
 ): Grant | undefined {
   if (privacy) {
     if (isGovernance) return { actingAs: 'DATA_GOVERNANCE', via: governanceGroup };
-    if (scope?.roles.includes('GOVERNANCE_OWNER')) return { actingAs: 'GOVERNANCE_OWNER', via: scope.governance_owner };
+    if (scope?.roles.includes('GOVERNANCE_OWNER')) return { actingAs: 'GOVERNANCE_OWNER', via: email };
     return undefined;
   }
-  if (scope?.roles.includes('STEWARD')) return { actingAs: 'STEWARD', via: scope.steward_group };
-  if (scope?.roles.includes('GOVERNANCE_OWNER')) return { actingAs: 'GOVERNANCE_OWNER', via: scope.governance_owner };
+  if (scope?.roles.includes('STEWARD')) return { actingAs: 'STEWARD', via: email };
+  if (scope?.roles.includes('GOVERNANCE_OWNER')) return { actingAs: 'GOVERNANCE_OWNER', via: email };
   return undefined;
 }
 

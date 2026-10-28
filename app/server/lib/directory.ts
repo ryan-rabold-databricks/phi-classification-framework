@@ -11,8 +11,8 @@ import { settings } from './settings';
  * groups, so nested groups count. The App service principal never reads group member lists,
  * which the workspace restricts to admins.
  *
- * A scope reviewer value (steward_group or governance_owner) matches when it is the user's
- * email or the name of one of their groups -- the same rule ingestion applies.
+ * Scope reviewers are email lists, matched against the user's email; these groups are used only
+ * for the Data Governance group (Privacy outcomes, reference-data edits, corrections).
  */
 export interface Principal {
   email: string;

@@ -21,13 +21,14 @@ def is_allowed(v):
     return v in ALLOWED
 
 
-def item(status=c.PENDING_STEWARD_REVIEW, suggested="name", owner="owner@example.com", stewards="clinical_stewards"):
-    return ItemContext("ITEM-1", "BATCH-1", status, suggested, datetime(2026, 10, 12, 8, 0), stewards, owner)
+def item(status=c.PENDING_STEWARD_REVIEW, suggested="name", owners=("owner@example.com",),
+         stewards=("steward@example.com", "steward2@example.com")):
+    return ItemContext("ITEM-1", "BATCH-1", status, suggested, datetime(2026, 10, 12, 8, 0), tuple(stewards), tuple(owners))
 
 
 def sub(decision, corrected=None, comment=None, by="steward@example.com", at=AT, stype=c.SUB_REVIEW, batch="BATCH-1",
-        seen="name", acting=ACTING_STEWARD, via="clinical_stewards"):
-    return Submission(decision, corrected, comment, by, at, stype, batch, seen, acting, via)
+        seen="name", acting=ACTING_STEWARD, via=None):
+    return Submission(decision, corrected, comment, by, at, stype, batch, seen, acting, via if via is not None else by)
 
 
 def check(it, s):
@@ -60,27 +61,24 @@ def test_not_phi_requires_comment_and_no_corrected_value():
     assert check(item(), sub(c.CONFIRM_NOT_PHI, comment="technical code")).ok
 
 
-def test_reviewer_authorization_must_match_the_current_scope():
-    # The App's recorded authorization is trusted only if it still names the scope's reviewers.
-    out = check(item(), sub(c.APPROVE_SUGGESTION, via="other_stewards"))
+def test_reviewer_must_be_on_the_scope_email_lists():
+    assert check(item(), sub(c.APPROVE_SUGGESTION, by="Steward2@Example.com")).ok  # case-insensitive
+    out = check(item(), sub(c.APPROVE_SUGGESTION, by="someone@example.com"))
     assert not out.ok and any("not a reviewer" in e for e in out.errors)
-    assert not check(item(), sub(c.APPROVE_SUGGESTION, acting=None, via=None)).ok
+    assert not check(item(), sub(c.APPROVE_SUGGESTION, acting=None)).ok
+    # Data Governance membership alone does not authorize review decisions.
     assert not check(item(), sub(c.APPROVE_SUGGESTION, acting=ACTING_DATA_GOVERNANCE, via="governance")).ok
-    assert check(item(), sub(c.APPROVE_SUGGESTION, via=" Clinical_Stewards ")).ok  # case and spacing
+
+
+def test_removed_steward_is_rejected_after_a_registry_change():
+    assert not check(item(stewards=("steward2@example.com",)), sub(c.APPROVE_SUGGESTION)).ok
 
 
 def test_governance_owner_may_review_in_place_of_steward():
-    out = check(item(), sub(c.APPROVE_SUGGESTION, by="Owner@Example.com", acting=ACTING_GOVERNANCE_OWNER,
-                            via="owner@example.com"))
+    out = check(item(), sub(c.APPROVE_SUGGESTION, by="Owner@Example.com", acting=ACTING_GOVERNANCE_OWNER))
     assert out.ok and out.reviewed_by == "owner@example.com" and out.acting_as == ACTING_GOVERNANCE_OWNER
-    moved = check(item(owner="new_owner@example.com"), sub(c.APPROVE_SUGGESTION, acting=ACTING_GOVERNANCE_OWNER,
-                                                           via="owner@example.com"))
-    assert not moved.ok  # the scope's owner changed after the App authorized the submission
-
-
-def test_steward_group_may_be_a_single_email():
-    it = item(stewards="steward@example.com")
-    assert check(it, sub(c.APPROVE_SUGGESTION, via="steward@example.com")).acting_as == ACTING_STEWARD
+    # An owner is not a steward unless listed as one.
+    assert not check(item(), sub(c.APPROVE_SUGGESTION, by="owner@example.com", acting=ACTING_STEWARD)).ok
 
 
 def test_time_rules():
@@ -95,7 +93,7 @@ def test_privacy_outcome_rules():
     out = check(it, sub(c.CONFIRM_NOT_PHI, comment="Privacy: not PHI", by="gov@example.com", **gov))
     assert out.ok and out.acting_as == ACTING_DATA_GOVERNANCE
     owner = check(it, sub(c.CONFIRM_NOT_PHI, comment="Privacy: not PHI", by="owner@example.com", stype=c.SUB_PRIVACY,
-                          acting=ACTING_GOVERNANCE_OWNER, via="owner@example.com"))
+                          acting=ACTING_GOVERNANCE_OWNER))
     assert owner.ok and owner.acting_as == ACTING_GOVERNANCE_OWNER
     steward = check(it, sub(c.CONFIRM_NOT_PHI, comment="x", stype=c.SUB_PRIVACY))  # stewards cannot record Privacy
     assert not steward.ok and any("Privacy outcome" in e for e in steward.errors)

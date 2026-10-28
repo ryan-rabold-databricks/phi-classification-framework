@@ -42,6 +42,14 @@ def _bool(v: str) -> str:
     return "true" if str(v).strip().lower() in {"true", "1", "yes", "y"} else "false"
 
 
+def _emails(v: str) -> str:
+    """Semicolon-separated emails -> a lower-case ARRAY<STRING> literal."""
+    emails = [e.strip().lower() for e in (v or "").split(";") if e.strip()]
+    if not emails:
+        raise ValueError("each scope needs at least one email in steward_emails and governance_owner_emails")
+    return "array(" + ", ".join(lit(e) for e in emails) + ")"
+
+
 def _date(v: str) -> str:
     v = (v or "").strip()
     return f"DATE{lit(v)}" if v else "CAST(NULL AS DATE)"
@@ -61,8 +69,8 @@ def load_scopes(sql: Sql, table: str, path: str) -> int:
                 lit(r["schema_name"].strip()),
                 lit(r["environment"].strip()),
                 lit(r["risk_tier"].strip().upper()),
-                lit(r["steward_group"].strip()),
-                lit(r["governance_owner"].strip()),
+                _emails(r["steward_emails"]),
+                _emails(r["governance_owner_emails"]),
                 _bool(r["scan_enabled"]),
                 _date(r["effective_date"]),
                 _date(r.get("expiration_date", "")),
@@ -71,8 +79,8 @@ def load_scopes(sql: Sql, table: str, path: str) -> int:
         + ")"
         for r in rows
     )
-    cols = ["scope_id", "catalog_name", "schema_name", "environment", "risk_tier", "steward_group",
-            "governance_owner", "scan_enabled", "effective_date", "expiration_date"]
+    cols = ["scope_id", "catalog_name", "schema_name", "environment", "risk_tier", "steward_emails",
+            "governance_owner_emails", "scan_enabled", "effective_date", "expiration_date"]
     changed = " OR ".join(f"NOT (t.{x} <=> s.{x})" for x in cols[1:])
     sql.run(
         f"""MERGE INTO {table} t

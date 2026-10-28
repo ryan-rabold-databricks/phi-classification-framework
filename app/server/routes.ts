@@ -30,8 +30,8 @@ interface ScopeRole {
   scope_id: string;
   catalog_name: string;
   schema_name: string;
-  steward_group: string;
-  governance_owner: string;
+  steward_emails: string[];
+  governance_owner_emails: string[];
   risk_tier: string;
   roles: ActingAs[];
 }
@@ -76,10 +76,21 @@ async function requireUser(req: Request): Promise<Principal> {
   return p;
 }
 
+/** A JSON array of emails (as returned by to_json) -> lower-case emails. */
+function emailList(json: string | null): string[] {
+  try {
+    const v: unknown = JSON.parse(json ?? '[]');
+    return Array.isArray(v) ? v.map((e) => String(e).trim().toLowerCase()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
 async function loadMe(p: Principal): Promise<Me> {
   const s = settings();
   const scopes = await runSql(
-    `SELECT scope_id, catalog_name, schema_name, steward_group, governance_owner, risk_tier
+    `SELECT scope_id, catalog_name, schema_name, to_json(steward_emails) AS steward_emails,
+            to_json(governance_owner_emails) AS governance_owner_emails, risk_tier
      FROM ${table(T.scope)}
      WHERE environment = :env AND current_date() BETWEEN effective_date AND coalesce(expiration_date, DATE'9999-12-31')
      ORDER BY scope_id`,
@@ -88,14 +99,16 @@ async function loadMe(p: Principal): Promise<Me> {
   const out: ScopeRole[] = [];
   for (const r of scopes) {
     const roles: ActingAs[] = [];
-    if (includes(p, r.steward_group)) roles.push('STEWARD');
-    if (includes(p, r.governance_owner)) roles.push('GOVERNANCE_OWNER');
+    const stewards = emailList(r.steward_emails);
+    const owners = emailList(r.governance_owner_emails);
+    if (stewards.includes(p.email)) roles.push('STEWARD');
+    if (owners.includes(p.email)) roles.push('GOVERNANCE_OWNER');
     out.push({
       scope_id: r.scope_id ?? '',
       catalog_name: r.catalog_name ?? '',
       schema_name: r.schema_name ?? '',
-      steward_group: r.steward_group ?? '',
-      governance_owner: r.governance_owner ?? '',
+      steward_emails: stewards,
+      governance_owner_emails: owners,
       risk_tier: r.risk_tier ?? '',
       roles,
     });
@@ -207,12 +220,19 @@ async function writeEvent(
   );
 }
 
+// Lower-case, de-duplicated reviewer emails; at least one per list.
+const emailArray = z
+  .array(z.string().trim().toLowerCase().email())
+  .min(1)
+  .max(100)
+  .transform((v) => [...new Set(v)]);
+
 const ScopeSchema = z.object({
   catalog_name: z.string().regex(/^[A-Za-z0-9_]+$/),
   schema_name: z.string().regex(/^([A-Za-z0-9_]+|\*)$/),
   risk_tier: z.enum(['HIGH', 'STANDARD']),
-  steward_group: z.string().trim().min(1).max(256),
-  governance_owner: z.string().trim().min(1).max(256),
+  steward_emails: emailArray,
+  governance_owner_emails: emailArray,
   scan_enabled: z.boolean(),
   effective_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   expiration_date: z
@@ -287,7 +307,7 @@ export function registerRoutes(app: Application): void {
           continue;
         }
         const scope = me.scopes.find((s) => s.scope_id === it.scope_id);
-        const grant = selectGrant(privacy, me.isGovernance, settings().PHI_GOVERNANCE_GROUP, scope);
+        const grant = selectGrant(privacy, me.isGovernance, settings().PHI_GOVERNANCE_GROUP, email, scope);
         if (grant) auth.set(d.review_item_id, grant);
         const errors = grant ? [] : ['You are not a reviewer for this scope'];
         errors.push(
@@ -355,8 +375,8 @@ export function registerRoutes(app: Application): void {
       await requireUser(req);
       res.json({
         scopes: await runSql(
-          `SELECT scope_id, catalog_name, schema_name, environment, risk_tier, steward_group, governance_owner,
-                  scan_enabled, effective_date, expiration_date, audit_updated_at, audit_updated_by
+          `SELECT scope_id, catalog_name, schema_name, environment, risk_tier, to_json(steward_emails) AS steward_emails,
+                  to_json(governance_owner_emails) AS governance_owner_emails, scan_enabled, effective_date, expiration_date, audit_updated_at, audit_updated_by
            FROM ${table(T.scope)} WHERE environment = :env ORDER BY scope_id`,
           { env: settings().PHI_ENV }
         ),
@@ -387,15 +407,17 @@ export function registerRoutes(app: Application): void {
         `MERGE INTO ${table(T.scope)} t
          USING (SELECT :id AS scope_id) s ON t.scope_id = s.scope_id
          WHEN MATCHED THEN UPDATE SET catalog_name = :cat, schema_name = :sch, risk_tier = :tier,
-           steward_group = :stewards, governance_owner = :owner, scan_enabled = :enabled,
+           steward_emails = from_json(:stewards, 'array<string>'),
+           governance_owner_emails = from_json(:owner, 'array<string>'), scan_enabled = :enabled,
            effective_date = CAST(:eff AS DATE), expiration_date = CAST(:exp AS DATE),
            audit_updated_at = current_timestamp(), audit_updated_by = current_user(),
            audit_updated_process = :proc, audit_updated_run_id = :run
-         WHEN NOT MATCHED THEN INSERT (scope_id, catalog_name, schema_name, environment, risk_tier, steward_group,
-           governance_owner, scan_enabled, effective_date, expiration_date,
+         WHEN NOT MATCHED THEN INSERT (scope_id, catalog_name, schema_name, environment, risk_tier, steward_emails,
+           governance_owner_emails, scan_enabled, effective_date, expiration_date,
            audit_created_at, audit_created_by, audit_created_process, audit_created_run_id,
            audit_updated_at, audit_updated_by, audit_updated_process, audit_updated_run_id)
-         VALUES (:id, :cat, :sch, :env, :tier, :stewards, :owner, :enabled, CAST(:eff AS DATE), CAST(:exp AS DATE),
+         VALUES (:id, :cat, :sch, :env, :tier, from_json(:stewards, 'array<string>'), from_json(:owner, 'array<string>'),
+           :enabled, CAST(:eff AS DATE), CAST(:exp AS DATE),
            ${auditValues()}, ${auditValues()})`,
         {
           id: scopeId,
@@ -403,8 +425,8 @@ export function registerRoutes(app: Application): void {
           sch: v.schema_name,
           env: s.PHI_ENV,
           tier: v.risk_tier,
-          stewards: v.steward_group,
-          owner: v.governance_owner,
+          stewards: JSON.stringify(v.steward_emails),
+          owner: JSON.stringify(v.governance_owner_emails),
           enabled: v.scan_enabled,
           eff: v.effective_date,
           exp: v.expiration_date ?? null,

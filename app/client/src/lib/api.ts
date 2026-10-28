@@ -5,8 +5,8 @@ export interface ScopeRole {
   scope_id: string;
   catalog_name: string;
   schema_name: string;
-  steward_group: string;
-  governance_owner: string;
+  steward_emails: string[];
+  governance_owner_emails: string[];
   risk_tier: string;
   roles: ActingAs[];
 }
@@ -56,8 +56,9 @@ export interface ScopeRow {
   schema_name: string;
   environment: string;
   risk_tier: string;
-  steward_group: string;
-  governance_owner: string;
+  /** JSON array of emails, as returned by the server */
+  steward_emails: string;
+  governance_owner_emails: string;
   scan_enabled: string;
   effective_date: string;
   expiration_date: string | null;
@@ -131,4 +132,26 @@ export function fmtDate(v: string | null | undefined): string {
   if (!v) return '';
   const d = new Date(v.includes('T') || v.endsWith('Z') ? v : `${v.replace(' ', 'T')}Z`);
   return Number.isNaN(d.getTime()) ? v : d.toLocaleString();
+}
+
+/** Parse a JSON array of emails from the server; tolerate legacy or malformed values. */
+export function parseEmails(json: string | null | undefined): string[] {
+  try {
+    const v: unknown = JSON.parse(json ?? '[]');
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Split user input (commas, semicolons, spaces, or new lines) into lower-case emails. */
+export function splitEmails(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .split(/[\s,;]+/)
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean)
+    ),
+  ];
 }
